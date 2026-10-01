@@ -405,7 +405,7 @@ async function renderAbout() {
     el('div', { class: 'k', text: '运行时' }), el('div', { class: 'v', text: 'Tauri 2 · WebView2' }),
     el('div', { class: 'k', text: '配置文件' }), el('div', { class: 'v mono' }, [el('span', { text: info.userDataPath })])
   ])))
-  content.appendChild(section('说明', '本应用的划词能力提取自开源项目 Cherry Studio（MIT）所使用的 selection-hook 选词引擎；界面与外壳为 Tauri 重写，安装包体积约为原 Electron 版的十分之一。', el('div', {}, [
+  content.appendChild(section('说明', '本应用的划词能力提取自开源项目 Cherry Studio（MIT）所使用的 selection-hook 选词引擎；界面与外壳为 Tauri 重写。', el('div', {}, [
     el('a', { class: 'link', text: '→ 访问 Cherry Studio (GitHub)', onclick: () => invoke('open_external', { url: 'https://github.com/CherryHQ/cherry-studio' }) })
   ])))
   content.appendChild(section('快捷操作', '', el('div', {}, [el('button', { class: 'btn danger', text: '恢复默认设置', onclick: async () => { if (!confirm('确定恢复默认设置？所有动作与模型配置将被清除。')) return; S = await invoke('settings_reset'); toast('已恢复默认设置'); render() } })])))

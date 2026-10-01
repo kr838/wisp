@@ -10,15 +10,16 @@
 
 ## 为什么这么小
 
-| | Electron 版（本项目的第一阶段） | **本版（Tauri）** |
-|---|---|---|
-| 安装包 | 97.4 MB | **2.15 MB** |
-| 应用 exe | 301 MB（解压后） | ~5 MB |
-| 选词引擎 | 内置 Node 原生插件 | **同一个 C++ 引擎**，编成 DLL（0.9 MB） |
-| 运行时 | 打包整个 Chromium（~96 MB） | 复用系统 WebView2（Windows 自带） |
+| | 本版（Tauri） |
+|---|---|
+| 安装包 | **2.2 MB** |
+| 应用 exe | ~5 MB |
+| 选词引擎 | **C++ 引擎**编成 DLL（0.9 MB） |
+| 运行时 | 复用系统 WebView2（Windows 自带），不打包浏览器内核 |
 
-体积差 45 倍，**功能与选词效果不变**——关键在于没有重写选词，而是把原 C++ 引擎
-编成 DLL 复用（见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)）。
+体积能压到这个量级，关键在于两点：**不打包浏览器内核**（用系统 WebView2），
+以及**没有重写选词**——而是把原 C++ 引擎编成 DLL 复用
+（见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)）。
 
 ---
 

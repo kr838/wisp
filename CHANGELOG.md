@@ -49,7 +49,7 @@
 
 ### 技术要点
 
-- 安装包 **2.15 MB**（此前 Electron 版 97.4 MB）——不再分发 Chromium，改用系统 WebView2
+- 安装包 **2.2 MB**：不打包浏览器内核，改用系统 WebView2
 - 选词引擎**复用** selection-hook 的 C++ 源码（MIT），编成 DLL；
   仅新增一个 C ABI 层替换原 N-API 绑定
 - 全程**免管理员**工具链（rustup 用户级安装 + MSYS2 便携解压）

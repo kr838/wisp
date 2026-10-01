@@ -10,29 +10,28 @@
 | **选词引擎** | **C++17**（selection-hook 原版）+ **C ABI shim** | 编成 `SelectionHook.dll`，Rust 经 FFI 调用 |
 | **HTTP** | `reqwest`（rustls） | OpenAI 兼容接口，含 SSE 流式解析 |
 | **窗口材质** | `window-vibrancy` + DWM | Mica / Mica Alt / Acrylic / 无 |
-| **打包** | `electron-builder` 等价物 → **`cargo tauri build`** | 输出 NSIS 安装包 |
+| **打包** | **`cargo tauri build`** | 输出 NSIS 安装包 |
 
-**关键取舍**：选词用 C++（不重写）、前端不用框架（省体积与构建链）、运行时用系统 WebView2
-（省掉 ~96 MB 的 Chromium）。
+**关键取舍**：选词用 C++（不重写）、前端不用框架（省体积与构建链）、运行时用系统
+WebView2 而不是随包分发浏览器内核——这三点决定了体积量级。
 
 ---
 
-## 2. 为什么最后是 Tauri，而不是 Electron
+## 2. 体积为什么能这么小
 
-项目第一阶段是 Electron 版：97.4 MB 安装包，其中**应用自身代码仅 860 KB**，
-其余 99.7% 是 Chromium 运行时（`SelectionAssistant.exe` 单个文件就有 234 MB，
-因为它把整个浏览器内核烧了进去）。
+| 项 | 值 |
+|---|---|
+| 安装包 | 2.2 MB |
+| 应用 exe | ~5 MB（Rust 静态链接，无额外运行时 DLL） |
+| 选词 DLL | 0.9 MB |
+| 运行时 | 系统 WebView2（Windows 自带） |
 
-功能与代码量完全不变的前提下，换成 Tauri 后：
+两点原因：
 
-| | Electron | Tauri |
-|---|---|---|
-| 安装包 | 97.4 MB | **2.15 MB** |
-| 运行时来源 | 随包分发 Chromium | 系统 WebView2 |
-| 后端语言 | Node.js | Rust |
-| 选词引擎 | 同一份 C++（编为 Node 原生模块） | **同一份 C++**（编为普通 DLL） |
-
-**结论**：体积的 45 倍差距来自"不再分发浏览器"，与功能多少无关。
+1. **不打包浏览器内核**。浏览器引擎是桌面应用体积的主要来源；Tauri 复用系统自带的
+   WebView2，因此省下了这一整块。
+2. **不重写选词**。选词引擎来自既有的 C++ 实现，编成 0.9 MB 的 DLL 直接复用
+   （见下一节的取舍说明）。
 
 ---
 
