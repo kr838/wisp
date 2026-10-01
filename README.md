@@ -180,8 +180,14 @@ docs/              架构 / 开发过程 / 缺陷记录
 
 ## 许可
 
-- `native/core`、`native/lib`：selection-hook 原版代码，MIT（Copyright © 2025 0xfullex）。
-- 其余（C ABI shim、Rust 后端、前端、文档）：本项目实现。
+本项目采用 **MIT** 许可，详见 [LICENSE](LICENSE)。
+
+内置的第三方组件保留各自的许可：
+
+| 组件 | 许可 |
+|---|---|
+| `native/core`、`native/lib`（selection-hook 原版代码） | MIT © 2025 0xfullex |
+| `ui/action/marked.umd.js`（marked） | MIT © 2011-2025 Christopher Jeffrey |
 
 ## 相关文档
 
