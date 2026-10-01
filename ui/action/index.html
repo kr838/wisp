@@ -18,32 +18,42 @@
         </div>
       </header>
 
-      <details class="think" id="think-wrap" hidden>
+      <!-- Both panels start collapsed: the answer is the content people came for. -->
+      <details class="fold" id="think-wrap" hidden>
         <summary>
-          <span class="think-label">思考过程</span>
-          <span class="think-state" id="think-state"></span>
+          <span class="fold-label">思考过程</span>
+          <span class="fold-state" id="think-state"></span>
         </summary>
-        <div class="think-text" id="think"></div>
+        <div class="fold-body" id="think"></div>
       </details>
 
-      <section class="src">
-        <div class="src-label">原文</div>
-        <div class="src-text" id="src"></div>
-      </section>
+      <details class="fold" id="src-wrap">
+        <summary>
+          <span class="fold-label">原文</span>
+          <span class="fold-state" id="src-hint"></span>
+        </summary>
+        <div class="fold-body" id="src"></div>
+      </details>
 
-      <section class="out" id="out-wrap">
-        <div class="out-text" id="out"></div>
+      <!-- Conversation: the first turn is the action's answer, later turns are follow-ups. -->
+      <section class="thread" id="thread">
         <div class="empty" id="empty">正在处理…</div>
       </section>
 
       <footer class="foot">
-        <button class="btn" id="btn-stop">停止</button>
-        <button class="btn" id="btn-retry">重试</button>
-        <span class="foot-gap"></span>
-        <button class="btn" id="btn-copy">复制结果</button>
-        <button class="btn accent" id="btn-settings">设置</button>
+        <div class="ask">
+          <textarea id="ask-input" rows="1" placeholder="追问…（Enter 发送，Shift+Enter 换行）"></textarea>
+          <button class="btn accent" id="btn-ask" title="发送">发送</button>
+        </div>
+        <div class="foot-row">
+          <button class="btn" id="btn-stop">停止</button>
+          <button class="btn" id="btn-retry">重试</button>
+          <span class="foot-gap"></span>
+          <button class="btn" id="btn-copy">复制结果</button>
+        </div>
       </footer>
     </div>
+    <script src="marked.umd.js"></script>
     <script src="action.js"></script>
   </body>
 </html>

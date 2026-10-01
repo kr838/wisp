@@ -17,12 +17,9 @@
       </nav>
       <main class="content" id="content"></main>
     </div>
-    <!-- Save state is always visible: edits auto-save, and this bar confirms it. The
-         button forces an immediate write (Enter does the same). -->
-    <footer class="savebar">
-      <span class="savestate" id="savestate"><i class="dot"></i><span id="savetext">已保存</span></span>
-      <button class="btn primary" id="savebtn" type="button">保存</button>
-    </footer>
+    <!-- Save feedback is transient: edits auto-save, and a "已保存" toast appears briefly.
+         No permanent bar (it occupied space for no reason) and no dedicated save button —
+         Enter or leaving the window commits immediately. -->
     <div class="toast" id="toast"></div>
     <script src="settings.js"></script>
   </body>

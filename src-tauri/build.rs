@@ -11,5 +11,10 @@ fn main() {
     // it runs as a normal windowed application.
     println!("cargo:rustc-link-arg=-Wl,--subsystem,windows");
 
+    // Integration tests link the library, so they need the same linker relaxation.
+    // `rustc-link-arg` above applies only to the crate's own lib/bin targets; without
+    // these, test binaries fail at load time with STATUS_ENTRYPOINT_NOT_FOUND.
+    println!("cargo:rustc-link-arg-tests=-Wl,--allow-multiple-definition");
+
     tauri_build::build()
 }

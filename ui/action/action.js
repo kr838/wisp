@@ -1,122 +1,287 @@
 'use strict'
-/* Action result window (Tauri). */
+/*
+ * Result window.
+ *
+ * Renders a conversation: the action's answer is the first turn, and 追问 appends further
+ * turns. Answers arrive as Markdown and are rendered with the vendored `marked`.
+ *
+ * Rendering strategy: while streaming, text is appended as PLAIN text (re-parsing Markdown
+ * on every chunk would be wasteful and would fight the caret), then re-rendered as Markdown
+ * once the turn completes. Long replies stay smooth and still end up formatted.
+ */
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 
 const $ = (id) => document.getElementById(id)
 const els = {
-  name: $('name'), model: $('model'),
-  badge: $('think-badge'), thinkWrap: $('think-wrap'), think: $('think'),
-  thinkState: $('think-state'), src: $('src'), out: $('out'), empty: $('empty'),
-  stop: $('btn-stop'), retry: $('btn-retry'), copy: $('btn-copy'), settings: $('btn-settings')
+  name: $('name'),
+  model: $('model'),
+  badge: $('think-badge'),
+  thinkWrap: $('think-wrap'),
+  think: $('think'),
+  thinkState: $('think-state'),
+  srcWrap: $('src-wrap'),
+  src: $('src'),
+  srcHint: $('src-hint'),
+  thread: $('thread'),
+  empty: $('empty'),
+  stop: $('btn-stop'),
+  retry: $('btn-retry'),
+  copy: $('btn-copy'),
+  askInput: $('ask-input'),
+  askBtn: $('btn-ask')
 }
 const THINK_LABELS = { off: '不思考', low: '轻度思考', medium: '思考', high: '深度思考' }
 
 let ctx = null
-let full = ''
 let reasoning = ''
 let streaming = false
+/** Markdown container currently being streamed into. */
+let currentAnswer = null
+/** Raw text of the current answer / of the most recently finished one. */
+let currentText = ''
+let lastAnswerText = ''
+
+// ---- markdown ---------------------------------------------------------------
+
+function renderMarkdown(el, text) {
+  try {
+    // `marked` is provided by the vendored UMD build (marked.umd.js).
+    el.innerHTML = window.marked.parse(text, { breaks: true, gfm: true })
+  } catch {
+    // Never show a blank result: fall back to plain text if parsing fails.
+    el.textContent = text
+  }
+  // Links must not navigate the webview; hand them to the OS browser.
+  for (const a of el.querySelectorAll('a[href]')) {
+    const href = a.getAttribute('href')
+    a.addEventListener('click', (e) => {
+      e.preventDefault()
+      if (/^https?:/i.test(href)) invoke('open_external', { url: href })
+    })
+  }
+}
+
+// ---- ui helpers -------------------------------------------------------------
 
 function setEmpty(text, isError) {
-  if (!text) { els.empty.classList.add('hidden'); els.empty.classList.remove('error'); return }
+  if (!text) {
+    els.empty.classList.add('hidden')
+    els.empty.classList.remove('error')
+    return
+  }
   els.empty.textContent = text
   els.empty.classList.remove('hidden')
   els.empty.classList.toggle('error', !!isError)
 }
-function paint(withCaret) {
-  els.out.textContent = full
-  if (withCaret) {
-    const c = document.createElement('span')
-    c.className = 'caret'
-    els.out.appendChild(c)
-  }
-  els.out.parentElement.scrollTop = els.out.parentElement.scrollHeight
+
+function setBusy(busy) {
+  streaming = busy
+  els.stop.disabled = !busy
+  els.retry.disabled = busy
+  els.askBtn.disabled = busy
+  els.askInput.disabled = busy
 }
+
+function scrollThread() {
+  els.thread.scrollTop = els.thread.scrollHeight
+}
+
+/** Append a question bubble for a follow-up turn. */
+function addQuestion(text) {
+  const q = document.createElement('div')
+  q.className = 'q'
+  q.textContent = text
+  els.thread.appendChild(q)
+  scrollThread()
+}
+
+/** Open a new, empty answer block and return its markdown container. */
+function beginAnswer() {
+  const wrap = document.createElement('div')
+  wrap.className = 'a'
+  const md = document.createElement('div')
+  md.className = 'md'
+  wrap.appendChild(md)
+  els.thread.appendChild(wrap)
+  currentAnswer = md
+  currentText = ''
+  return md
+}
+
+/** Stream raw text into the current answer (plain text + caret). */
+function appendChunk(text) {
+  if (!currentAnswer) beginAnswer()
+  currentText += text
+  currentAnswer.textContent = currentText
+  const caret = document.createElement('span')
+  caret.className = 'caret'
+  currentAnswer.appendChild(caret)
+  scrollThread()
+}
+
+/** Finish the current answer: render its Markdown and drop the caret. */
+function finishAnswer(finalText) {
+  if (typeof finalText === 'string' && finalText && !currentText) currentText = finalText
+  if (!currentAnswer) beginAnswer()
+  renderMarkdown(currentAnswer, currentText)
+  lastAnswerText = currentText
+  scrollThread()
+}
+
 function paintReasoning() {
-  if (!reasoning) { els.thinkWrap.hidden = true; return }
+  if (!reasoning) {
+    els.thinkWrap.hidden = true
+    return
+  }
   els.thinkWrap.hidden = false
   els.think.textContent = reasoning
   els.thinkState.textContent = streaming ? '思考中…' : '已完成'
-  els.think.scrollTop = els.think.scrollHeight
 }
-function setBusy(b) {
-  streaming = b
-  els.stop.disabled = !b
-  els.retry.disabled = b
-}
-/// Paint-time appearance. The window backdrop (mica/acrylic) is applied natively; here we
-/// only set the tint opacity over it, so lowering it reveals more of the material.
+
 async function applyAppearance() {
   try {
     const p = await invoke('ui_prefs')
-    document.documentElement.setAttribute('data-theme', p.theme === 'dark' ? 'dark' : 'light')
-    document.documentElement.style.setProperty('--glass-a', String(p.glassOpacity ?? 0.62))
-    if (p.material === 'none') {
-      // No backdrop: fall back to an opaque surface so the window is still readable.
-      document.documentElement.style.setProperty('--glass-solid', '1')
-    }
+    const el = document.documentElement
+    el.setAttribute('data-theme', p.theme === 'dark' ? 'dark' : 'light')
+    el.setAttribute('data-material', p.material || 'mica')
+    el.style.setProperty('--glass-a', String(p.glassOpacity ?? 0.62))
   } catch {
     /* keep defaults */
   }
 }
 
+// ---- lifecycle --------------------------------------------------------------
+
 async function begin() {
   await applyAppearance()
   ctx = await invoke('action_get_context')
   if (!ctx) return
+
   els.name.textContent = ctx.action.name || '处理'
   if (ctx.action.color) document.documentElement.style.setProperty('--c', ctx.action.color)
   els.model.textContent = ctx.provider ? ctx.modelName : '未配置模型'
+  els.badge.textContent =
+    ctx.thinkingSupported && ctx.thinkingLevel && ctx.thinkingLevel !== 'auto'
+      ? THINK_LABELS[ctx.thinkingLevel] || ctx.thinkingLevel
+      : ''
+
+  // Source text: collapsed by default, with a length hint so it stays discoverable.
+  const chars = (ctx.text || '').length
   els.src.textContent = ctx.text || ''
-  els.badge.textContent = ctx.thinkingSupported && ctx.thinkingLevel && ctx.thinkingLevel !== 'auto'
-    ? (THINK_LABELS[ctx.thinkingLevel] || ctx.thinkingLevel) : ''
-  full = ''
-  reasoning = ''
+  els.srcHint.textContent = chars ? chars + ' 字' : ''
+  els.srcWrap.open = false
+
   els.thinkWrap.hidden = true
   els.thinkWrap.open = false
-  paintReasoning()
+  reasoning = ''
+  els.thread.innerHTML = ''
+  els.thread.appendChild(els.empty)
+  currentAnswer = null
 
   if (!ctx.provider) {
-    paint(false)
-    setEmpty('尚未配置 AI 模型。点击右下角「设置」添加模型提供商后即可使用。', true)
-    setBusy(false); els.stop.disabled = true; els.retry.disabled = true
+    setEmpty('尚未配置 AI 模型。右键托盘图标 → 打开设置，添加模型提供商。', true)
+    setBusy(false)
+    els.stop.disabled = true
+    els.retry.disabled = true
+    els.askInput.disabled = true
+    els.askBtn.disabled = true
     return
   }
+
   setBusy(true)
   setEmpty('正在生成…')
+  beginAnswer()
   await invoke('action_run')
 }
 
+// ---- follow-up --------------------------------------------------------------
+
+async function sendFollowUp() {
+  const text = els.askInput.value.trim()
+  if (!text || streaming) return
+  els.askInput.value = ''
+  autoGrow()
+  els.askInput.disabled = true
+  els.askBtn.disabled = true
+  const res = await invoke('action_ask', { text })
+  if (res && res.ok === false) {
+    // The question was not sent: restore it so the user does not lose their typing.
+    els.askInput.disabled = false
+    els.askBtn.disabled = false
+    els.askInput.value = text
+    autoGrow()
+    setEmpty(res.error || '发送失败', true)
+  }
+}
+
+function autoGrow() {
+  const t = els.askInput
+  t.style.height = 'auto'
+  t.style.height = Math.min(t.scrollHeight, 96) + 'px'
+}
+
+// ---- events -----------------------------------------------------------------
+
 els.stop.addEventListener('click', () => invoke('action_stop'))
-els.retry.addEventListener('click', () => { full = ''; els.out.textContent = ''; begin() })
+els.retry.addEventListener('click', () => begin())
 els.copy.addEventListener('click', async () => {
-  if (!full) return
-  await invoke('action_copy', { text: full })
+  const text = lastAnswerText || currentText
+  if (!text) return
+  await invoke('action_copy', { text })
   const prev = els.copy.textContent
   els.copy.textContent = '已复制'
   setTimeout(() => (els.copy.textContent = prev), 1200)
 })
-els.settings.addEventListener('click', () => invoke('open_settings'))
 $('btn-close').addEventListener('click', () => invoke('action_close'))
 
+els.askBtn.addEventListener('click', sendFollowUp)
+els.askInput.addEventListener('input', autoGrow)
+els.askInput.addEventListener('keydown', (e) => {
+  // Enter sends; Shift+Enter inserts a newline. Never fire while composing IME text.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault()
+    sendFollowUp()
+  }
+})
+
 listen('action-start', () => begin())
-listen('action-chunk', (e) => { full += e.payload; setEmpty(''); paint(true) })
-listen('action-reasoning', (e) => { reasoning += e.payload; paintReasoning() })
+listen('action-turn', (e) => {
+  // A follow-up turn: show the question, then open a fresh answer block.
+  const user = e && e.payload ? e.payload.user : ''
+  addQuestion(user || '')
+  setEmpty('')
+  beginAnswer()
+})
+listen('action-reasoning', (e) => {
+  reasoning += e.payload
+  paintReasoning()
+})
+listen('action-chunk', (e) => {
+  setEmpty('')
+  appendChunk(e.payload)
+})
 listen('action-done', (e) => {
-  if (typeof e.payload === 'string' && e.payload && !full) full = e.payload
-  setBusy(false); paintReasoning()
-  setEmpty(full ? '' : '模型没有返回内容。', !full)
-  paint(false)
+  setBusy(false)
+  paintReasoning()
+  finishAnswer(e.payload)
+  setEmpty('')
 })
 listen('action-error', (e) => {
-  setBusy(false); paintReasoning()
-  if (!full) setEmpty(e.payload || '请求失败', true)
-  else { setEmpty(''); paint(false) }
+  setBusy(false)
+  paintReasoning()
+  if (currentText) {
+    finishAnswer()
+    setEmpty('')
+  } else {
+    setEmpty(e.payload || '请求失败', true)
+  }
 })
 listen('action-aborted', () => {
-  setBusy(false); paintReasoning()
-  setEmpty(full ? '' : '已停止。')
-  paint(false)
+  setBusy(false)
+  paintReasoning()
+  if (currentText) finishAnswer()
+  setEmpty(currentText ? '' : '已停止。')
 })
 
 begin()

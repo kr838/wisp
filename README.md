@@ -44,10 +44,17 @@
 - 流式输出；可复制 / 重试 / 停止
 - **自定义请求头**（每行一个 `Name: Value`）；OpenCode 系自动附加 `x-opencode-session`
 
+**结果窗口**
+- **Markdown 渲染**：AI 回复按 Markdown 排版（标题 / 列表 / 表格 / 代码块 / 引用）
+- **追问**：可继续对话，完整历史随请求发送，多轮上下文不丢
+- 思考过程、**原文**均为折叠面板（默认收起，原文带字数提示）
+- 流式输出；可停止 / 重试 / 复制结果
+
 **界面**
 - 悬浮条：纯文字扁平风格，每个动作独立配色，尺寸精确贴合内容
-- 结果窗口：单层毛玻璃
-- 设置窗口：四页（通用 / 动作 / 模型 / 关于），**底部常驻保存状态栏 + 保存按钮 + 回车即存**
+- 单层毛玻璃（窗口即表面，无内外分层）
+- 设置窗口：Windows 原生标题栏，四页（通用 / 动作 / 模型 / 关于）
+- 保存为**自动保存**：改完即存，右下角短暂提示「已保存」；回车或关窗也会立即落盘
 - 托盘常驻；首次启动（未配置模型时）自动打开设置
 
 ---
@@ -64,6 +71,7 @@
 2. 首次启动会自动打开设置 →「模型」添加提供商（填 Base URL / API Key / 模型名）→ 点「测试连接」。
 3. 在任意软件中选中文字 → 悬浮条出现 → 点击动作查看结果。
 4. 想用「复制 / 搜索」→ 设置 →「动作」→ 打开对应开关。
+5. 结果窗口底部可**继续追问**（Enter 发送，Shift+Enter 换行）；公式化的回复会自动排版。
 
 配置文件：`%APPDATA%\wisp\settings.json`（界面里改完自动保存，底部状态栏会显示保存状态）。
 
@@ -103,7 +111,17 @@ cargo tauri build --bundles nsis
 
 ```bash
 cd src-tauri
-cargo test --test actions_default --test roundtrip   # 不需要 DLL
+cargo test --test actions_default --test roundtrip   # 纯逻辑测试，不需要 DLL
+```
+
+验证「多轮对话 + 流式解析」（在应用进程内运行，绕开测试二进制的 DLL 加载问题）：
+
+```bash
+# 终端 A：启动模拟接口（会打印每个请求的 roles）
+node scripts/mock-openai.js 8799
+# 终端 B
+cd src-tauri && WISP_DEBUG=1 ./target/release/selection-assistant.exe --selftest-chat http://127.0.0.1:8799/v1
+# 期望：第一条 roles=system,user ；第二条 roles=system,user,assistant,user
 ```
 
 > `cargo test --lib` 会因测试二进制旁缺少 `SelectionHook.dll` 而报
@@ -115,6 +133,7 @@ cargo test --test actions_default --test roundtrip   # 不需要 DLL
 |---|---|
 | `--settings` | 启动即打开设置窗口 |
 | `--preview` | 在屏幕中部直接显示悬浮条（带示例文字），无需真实划词——用于静态查看 UI |
+| `--selftest-chat <baseUrl>` | 在应用进程内跑两轮对话并写入日志，用于验证多轮请求与流式解析 |
 
 ### 调试
 
@@ -152,6 +171,13 @@ docs/              架构 / 开发过程 / 缺陷记录
 
 ---
 
+## 第三方组件
+
+| 组件 | 用途 | 许可 |
+|---|---|---|
+| `selection-hook`（`native/core`、`native/lib`） | Windows 选词引擎 | MIT © 2025 0xfullex |
+| [marked](https://github.com/markedjs/marked)（`ui/action/marked.umd.js`，内置） | 结果窗口的 Markdown 渲染 | MIT |
+
 ## 许可
 
 - `native/core`、`native/lib`：selection-hook 原版代码，MIT（Copyright © 2025 0xfullex）。
@@ -159,6 +185,4 @@ docs/              架构 / 开发过程 / 缺陷记录
 
 ## 相关文档
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 技术栈、架构、关键技术决策
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 开发过程流水与踩坑记录
-- [docs/BUGS.md](docs/BUGS.md) — 缺陷清单与根因分析
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 技术栈、架构与关键技术决策

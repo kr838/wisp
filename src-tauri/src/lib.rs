@@ -58,6 +58,9 @@ struct State {
     last_selection: Mutex<Option<selection::SelectionPayload>>,
     pending: Mutex<Option<PendingAction>>,
     streaming: AtomicBool,
+    /// Conversation history for the open result window: [system, user, assistant, user, ...].
+    /// Kept here so 追问 can continue the same context; reset whenever a new action starts.
+    conversation: Mutex<Vec<ai::ChatMessage>>,
     toolbar_width: Mutex<f64>,
     /// The webview's own device pixel ratio (from the renderer). It can differ from the
     /// window's `scale_factor`, and window sizing must use this one.
@@ -81,6 +84,7 @@ impl Default for State {
             last_selection: Mutex::new(None),
             pending: Mutex::new(None),
             streaming: AtomicBool::new(false),
+            conversation: Mutex::new(Vec::new()),
             toolbar_width: Mutex::new(360.0),
             toolbar_dpr: Mutex::new(1.0),
             toolbar_last_req: Mutex::new((0.0, 0.0)),
@@ -361,6 +365,15 @@ fn run_action(app: AppHandle, action_id: String) -> Value {
         .unwrap_or_else(|| "auto".into());
     let supported = provider.as_ref().map(ai::supports_thinking).unwrap_or(false);
 
+    // Fresh conversation for this action: system prompt + the selected text.
+    {
+        let st = app.state::<State>();
+        let mut conv = st.conversation.lock().unwrap();
+        conv.clear();
+        conv.push(ai::ChatMessage::system(ai::system_prompt(&action.builtin, &action.prompt)));
+        conv.push(ai::ChatMessage::user(sel.text.clone()));
+    }
+
     let pending = PendingAction {
         action: json!({ "id": action.id, "name": action.name, "icon": action.icon, "builtin": action.builtin }),
         text: sel.text.clone(),
@@ -427,20 +440,32 @@ fn action_run(app: AppHandle) {
     };
     let provider: store::Provider = serde_json::from_value(prov_val).unwrap_or_default();
 
+    let level = p.thinking_level.clone();
+    stream_conversation(&app, provider, level);
+}
+
+/// Stream the current conversation to the result window.
+///
+/// Shared by the initial action and by 追问, so both paths emit exactly the same events
+/// (`action-chunk` / `action-reasoning` / `action-done` / `action-error`). The assistant
+/// reply is appended to the conversation so the next follow-up has full context.
+fn stream_conversation(app: &AppHandle, provider: store::Provider, level: String) {
     app.state::<State>().streaming.store(true, Ordering::SeqCst);
     let app2 = app.clone();
-    crate::dlogf!(
-        "[app] action_run model={} level={} userLen={}",
-        provider.model, p.thinking_level, p.text.chars().count()
-    );
+    let messages = {
+        let st = app2.state::<State>();
+        let conv = st.conversation.lock().unwrap();
+        conv.clone()
+    };
+    crate::dlogf!("[app] stream model={} level={} turns={}", provider.model, level, messages.len());
+
     tauri::async_runtime::spawn(async move {
         let app_chunk = app2.clone();
         let app_reason = app2.clone();
         let res = ai::chat_stream(
             &provider,
-            &p.system_prompt,
-            &p.text,
-            &p.thinking_level,
+            &messages,
+            &level,
             move |t| {
                 let _ = app_chunk.emit_to("action", "action-chunk", t.to_string());
             },
@@ -450,16 +475,32 @@ fn action_run(app: AppHandle) {
         )
         .await;
 
+        // A stop between request and completion must not deliver a reply.
         let streaming = app2.state::<State>().streaming.load(Ordering::SeqCst);
         match res {
             Ok(out) => {
-                crate::dlogf!("[app] action_run done, textLen={}", out.text.chars().count());
+                crate::dlogf!("[app] stream done, textLen={}", out.text.chars().count());
                 if streaming {
+                    {
+                        let st = app2.state::<State>();
+                        st.conversation
+                            .lock()
+                            .unwrap()
+                            .push(ai::ChatMessage::assistant(out.text.clone()));
+                    }
                     let _ = app2.emit_to("action", "action-done", out.text);
                 }
             }
             Err(e) => {
-                crate::dlogf!("[app] action_run error: {e}");
+                crate::dlogf!("[app] stream error: {e}");
+                // Drop the unanswered user turn so a retry does not double-send it.
+                {
+                    let st = app2.state::<State>();
+                    let mut conv = st.conversation.lock().unwrap();
+                    if conv.last().map(|m| m.role == "user").unwrap_or(false) {
+                        conv.pop();
+                    }
+                }
                 if streaming {
                     let _ = app2.emit_to("action", "action-error", e);
                 }
@@ -467,6 +508,32 @@ fn action_run(app: AppHandle) {
         }
         app2.state::<State>().streaming.store(false, Ordering::SeqCst);
     });
+}
+
+/// Ask a follow-up question in the current result window.
+#[tauri::command]
+fn action_ask(app: AppHandle, text: String) -> Value {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return json!({ "ok": false, "error": "内容为空" });
+    }
+    // Hold the managed state for the whole call; `app.state()` returns a borrowed guard and
+    // a temporary would not outlive the lock guard below.
+    let state = app.state::<State>();
+    let pending = state.pending.lock().unwrap().clone();
+    let Some(p) = pending else {
+        return json!({ "ok": false, "error": "没有进行中的动作" });
+    };
+    let Some(prov_val) = p.provider.clone() else {
+        return json!({ "ok": false, "error": "未配置 AI 模型" });
+    };
+    let provider: store::Provider = serde_json::from_value(prov_val).unwrap_or_default();
+
+    state.conversation.lock().unwrap().push(ai::ChatMessage::user(text.clone()));
+    // Tell the window to open a new turn before chunks start arriving.
+    let _ = app.emit_to("action", "action-turn", json!({ "user": text }));
+    stream_conversation(&app, provider, p.thinking_level.clone());
+    json!({ "ok": true })
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1151,7 @@ pub fn run() {
             run_action,
             action_get_context,
             action_run,
+            action_ask,
             action_stop,
             action_copy,
             action_close,
@@ -1164,6 +1232,44 @@ pub fn run() {
             crate::dlogf!("[app] setup done; providers={} no_provider={no_provider}", s.providers.len());
             if std::env::args().any(|a| a == "--settings") || no_provider {
                 show_settings(&handle);
+            }
+
+            // `--selftest-chat <url>` runs a two-turn conversation against an endpoint and
+            // prints the result. It exercises the real request path (message list, streaming
+            // parse, follow-up context) inside the app binary, which links the native engine
+            // correctly — integration tests cannot, they fail at load time.
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(i) = args.iter().position(|a| a == "--selftest-chat") {
+                let base = args.get(i + 1).cloned().unwrap_or_else(|| "http://127.0.0.1:8799/v1".into());
+                let provider = store::Provider {
+                    id: "selftest".into(),
+                    name: "selftest".into(),
+                    api_base: base,
+                    api_key: "test".into(),
+                    model: "mock-model".into(),
+                    temperature: Some(0.0),
+                    max_tokens: None,
+                    thinking: "auto".into(),
+                    thinking_level: None,
+                    headers: vec![],
+                };
+                tauri::async_runtime::spawn(async move {
+                    use ai::ChatMessage;
+                    let mut conv = vec![ChatMessage::system("sys"), ChatMessage::user("hello")];
+                    let r1 = ai::chat_stream(&provider, &conv, "off", |_| {}, |_| {}).await;
+                    match r1 {
+                        Ok(a) => {
+                            crate::dlogf!("SELFTEST turn1={:?}", a.text);
+                            conv.push(ChatMessage::assistant(a.text));
+                            conv.push(ChatMessage::user("explain"));
+                            match ai::chat_stream(&provider, &conv, "off", |_| {}, |_| {}).await {
+                                Ok(b) => crate::dlogf!("SELFTEST turn2={:?} turns={}", b.text, conv.len()),
+                                Err(e) => crate::dlogf!("SELFTEST turn2 FAILED: {e}"),
+                            }
+                        }
+                        Err(e) => crate::dlogf!("SELFTEST turn1 FAILED: {e}"),
+                    }
+                });
             }
 
             // `--preview` shows the toolbar with sample text at the cursor, without needing

@@ -67,13 +67,15 @@ function toast(m) {
 let saveTimer = null
 let pendingPatch = null
 
-const saveStateEl = document.getElementById('savestate')
-const saveTextEl = document.getElementById('savetext')
-const saveBtn = document.getElementById('savebtn')
-
+/// Transient feedback instead of a permanent status bar: saving is automatic, so the UI
+/// only needs to confirm it happened (and shout if it failed).
 function setSaveState(kind, text) {
-  saveStateEl.className = 'savestate' + (kind ? ' ' + kind : '')
-  saveTextEl.textContent = text
+  if (kind === 'error') {
+    toast(text)
+  } else if (kind === '' && text === '已保存') {
+    toast('已保存')
+  }
+  // 'pending' / 'saving' are intentionally silent — the write follows a moment later.
 }
 
 /// Write any pending patch immediately.
@@ -421,11 +423,7 @@ function render() {
 document.querySelectorAll('.nav').forEach((n) => n.addEventListener('click', () => { tab = n.dataset.tab; render() }))
 listen('settings-changed', (e) => { S = e.payload })
 
-saveBtn.addEventListener('click', async () => {
-  await flushSave()
-  toast('已保存')
-})
-// Never lose an edit because the window went away.
+// Never lose an edit because the window went away (no explicit save button needed).
 window.addEventListener('blur', () => { void flushSave() })
 window.addEventListener('beforeunload', () => { void flushSave() })
 

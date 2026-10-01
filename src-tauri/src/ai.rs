@@ -1,6 +1,7 @@
 //! AI provider client (OpenAI-compatible) with thinking-level control.
 
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::store::Provider;
@@ -98,14 +99,35 @@ fn apply_headers(mut req: reqwest::RequestBuilder, provider: &Provider) -> reqwe
     req
 }
 
+/// One message in a conversation.
+///
+/// Follow-up questions need the whole history, so requests are built from a message list
+/// rather than a fixed (system, user) pair.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl ChatMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self { role: "system".into(), content: content.into() }
+    }
+    pub fn user(content: impl Into<String>) -> Self {
+        Self { role: "user".into(), content: content.into() }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self { role: "assistant".into(), content: content.into() }
+    }
+}
+
 /// Build the request body, adding provider-specific thinking parameters only when
 /// the level is meaningful (so plain "auto" stays a vanilla OpenAI call).
-pub fn build_body(provider: &Provider, system: &str, user: &str, level: &str, stream: bool) -> Value {
-    let mut msgs = Vec::new();
-    if !system.trim().is_empty() {
-        msgs.push(json!({ "role": "system", "content": system }));
-    }
-    msgs.push(json!({ "role": "user", "content": user }));
+pub fn build_body(provider: &Provider, messages: &[ChatMessage], level: &str, stream: bool) -> Value {
+    let msgs: Vec<Value> = messages
+        .iter()
+        .map(|m| json!({ "role": m.role, "content": m.content }))
+        .collect();
 
     let mut body = json!({
         "model": provider.model,
@@ -201,8 +223,7 @@ fn extract_reasoning(v: &Value) -> String {
 /// Stream a completion. `on_chunk` receives answer text, `on_reasoning` thinking text.
 pub async fn chat_stream<F, R>(
     provider: &Provider,
-    system: &str,
-    user: &str,
+    messages: &[ChatMessage],
     level: &str,
     mut on_chunk: F,
     mut on_reasoning: R,
@@ -218,7 +239,7 @@ where
     if provider.api_base.trim().is_empty() {
         return Err("API 地址为空".into());
     }
-    let body = build_body(provider, system, user, level, true);
+    let body = build_body(provider, messages, level, true);
 
     let client = reqwest::Client::new();
     let req = apply_headers(client.post(&url).json(&body), provider);
@@ -271,7 +292,12 @@ where
 /// One tiny non-streaming request to validate connectivity.
 pub async fn test_provider(provider: &Provider) -> (bool, String) {
     let url = endpoint(&provider.api_base);
-    let body = build_body(provider, "Reply with the single word: ok", "ping", "off", false);
+    let body = build_body(
+        provider,
+        &[ChatMessage::system("Reply with the single word: ok"), ChatMessage::user("ping")],
+        "off",
+        false,
+    );
     let client = reqwest::Client::new();
     let req = apply_headers(client.post(&url).json(&body), provider);
     match req.send().await {

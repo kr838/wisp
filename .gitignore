@@ -20,3 +20,7 @@ out.txt
 *.swp
 Thumbs.db
 desktop.ini
+
+# ---- 内部开发文档（不随公开发布）----
+docs/DEVELOPMENT.md
+docs/BUGS.md
