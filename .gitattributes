@@ -1,0 +1,26 @@
+# Normalize line endings so the repo is consistent across platforms.
+# Windows-only project, but the C++/Rust sources are also readable on other systems.
+* text=auto
+
+# Windows-only scripts must keep CRLF for cmd/PowerShell compatibility.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Everything else: LF in the repository.
+*.rs   text eol=lf
+*.cc   text eol=lf
+*.h    text eol=lf
+*.cpp  text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+
+# Binary assets: never touch.
+*.png binary
+*.ico binary
+*.dll binary
+*.exe binary
+*.a   binary
