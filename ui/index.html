@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Wisp · 设置</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <!-- No custom titlebar: this window keeps the native Windows frame, which already
+         provides minimise / maximise / close. Drawing our own on top duplicated them. -->
+    <div class="shell">
+      <nav class="side">
+        <button class="nav" data-tab="general">通用</button>
+        <button class="nav" data-tab="actions">动作</button>
+        <button class="nav" data-tab="models">模型</button>
+        <button class="nav" data-tab="about">关于</button>
+      </nav>
+      <main class="content" id="content"></main>
+    </div>
+    <!-- Save state is always visible: edits auto-save, and this bar confirms it. The
+         button forces an immediate write (Enter does the same). -->
+    <footer class="savebar">
+      <span class="savestate" id="savestate"><i class="dot"></i><span id="savetext">已保存</span></span>
+      <button class="btn primary" id="savebtn" type="button">保存</button>
+    </footer>
+    <div class="toast" id="toast"></div>
+    <script src="settings.js"></script>
+  </body>
+</html>

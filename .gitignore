@@ -1,0 +1,22 @@
+# ---- Rust / Tauri ----
+src-tauri/target/
+src-tauri/gen/
+
+# ---- 构建产物（可重新生成）----
+native/*.exe
+native/*.dll
+native/*.a
+src-tauri/SelectionHook.dll
+src-tauri/target/release/bundle/
+
+# ---- 调试与临时文件 ----
+*.log
+err.txt
+out.txt
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

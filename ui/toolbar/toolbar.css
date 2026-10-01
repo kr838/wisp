@@ -1,0 +1,143 @@
+/*
+ * Floating selection toolbar.
+ *
+ * ── Layout contract (what makes it look right) ────────────────────────────────────────
+ * The window rectangle must be EXACTLY the visible surface, and the surface must FILL the
+ * window. Two earlier defects came from breaking this:
+ *   1. window = content + 8px while the pill was `max-content` and centred → a ~4px strip
+ *      of raw backdrop showed on each side (the "translucent frame" look);
+ *   2. window height == pill height while the pill also drew an outer box-shadow → the
+ *      shadow fell entirely outside the window and was clipped (no elevation, dirty edge).
+ * So `.pill` is `width/height: 100%` of the window, and elevation is expressed with an
+ * INSET hairline + top highlight — which can be drawn inside the window, unlike an outer
+ * shadow.
+ *
+ * The radius matches DWM's window rounding (8px); a mismatch leaves crescent-shaped
+ * slivers of bare backdrop in the corners.
+ *
+ * Background: the window itself carries the native material (mica / mica_alt / acrylic /
+ * none). `.pill` only lays a tint over it, using the same `--glass-a` opacity as the result
+ * window so both surfaces stay consistent.
+ */
+
+:root {
+  --glass-a: 0.68;
+  --card: rgba(255, 255, 255, var(--glass-a));
+  --text: #18181b;
+  --text-dim: #6b7280;
+  --hover: rgba(24, 24, 27, 0.055);
+  --active: rgba(24, 24, 27, 0.095);
+  /* Hairlines drawn inside the window (an outer border would be clipped). */
+  --edge: rgba(255, 255, 255, 0.55);
+  --edge-line: rgba(0, 0, 0, 0.10);
+  --divider: rgba(0, 0, 0, 0.10);
+}
+:root[data-theme='dark'] {
+  --card: rgba(28, 28, 30, var(--glass-a));
+  --text: #ececee;
+  --text-dim: #a1a1aa;
+  --hover: rgba(255, 255, 255, 0.08);
+  --active: rgba(255, 255, 255, 0.13);
+  --edge: rgba(255, 255, 255, 0.09);
+  --edge-line: rgba(255, 255, 255, 0.13);
+  --divider: rgba(255, 255, 255, 0.15);
+}
+/* Material "none": there is no backdrop to reveal, so use an opaque surface. */
+:root[data-material='none'] { --card: #ffffff; }
+:root[data-theme='dark'][data-material='none'] { --card: #232326; }
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html,
+body {
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* The pill fills the window exactly — no slack, so no backdrop can show around it. */
+#root {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.pill {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--card);
+  overflow: hidden;
+  /* Inset hairline + soft top highlight: elevation that fits inside the window. */
+  box-shadow: inset 0 0 0 0.5px var(--edge-line), inset 0 1px 0 0 var(--edge);
+}
+
+/* An action chip. flex:0 0 auto keeps the measured width honest. */
+.act {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--c, var(--text-dim));
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 450;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.16s ease-out, color 0.16s ease-out;
+}
+/* Hover tints the chip with its own colour rather than a flat grey. */
+.act:hover {
+  background: color-mix(in srgb, var(--c, #888) 13%, transparent);
+  color: var(--c, var(--text));
+}
+.act:active {
+  background: color-mix(in srgb, var(--c, #888) 21%, transparent);
+}
+
+/* Utility actions (search / settings) stay neutral until hovered. */
+.act.muted { color: var(--text-dim); }
+.act.muted:hover { background: var(--hover); color: var(--text); }
+.act.muted:active { background: var(--active); }
+
+/* One hairline before the utility group. */
+.gap {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 15px;
+  margin: 0 3px;
+  background: var(--divider);
+}
+
+.pill.busy .act { opacity: 0.45; pointer-events: none; }
+
+.hint {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.act:focus-visible {
+  outline: 2px solid var(--c, var(--text));
+  outline-offset: -2px;
+}

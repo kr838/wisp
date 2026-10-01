@@ -1,0 +1,270 @@
+/*
+ * Action / result window.
+ *
+ * Shares the toolbar's design language: flat surfaces, neutral text palette, one accent
+ * colour, hairline borders, and a whisper-thin shadow. No gradients, no emoji icons.
+ */
+
+:root {
+  /* Semi-transparent so the acrylic backdrop shows through — this is the glass tint. */
+  /* Tint over the native backdrop; --glass-a is set from settings at runtime. */
+  --glass-a: 0.62;
+  --bg: rgba(255, 255, 255, var(--glass-a));
+  --fg: #18181b;
+  --muted: #6b7280;
+  --border: rgba(0, 0, 0, 0.08);
+  --divider: rgba(0, 0, 0, 0.07);
+  --src-bg: rgba(24, 24, 27, 0.045);
+  --hover: rgba(24, 24, 27, 0.05);
+  --active: rgba(24, 24, 27, 0.09);
+  --accent: #3b6fe0;
+  --accent-soft: rgba(59, 111, 224, 0.10);
+  --danger: #dc2626;
+  --shadow: 0 2px 3px rgba(50, 50, 50, 0.10), 0 8px 22px rgba(24, 24, 27, 0.10);
+  /* Hairline that reads on glass without drawing a heavy box. */
+  --glass-edge: rgba(255, 255, 255, 0.55);
+}
+:root[data-theme='dark'] {
+  --bg: rgba(28, 28, 30, var(--glass-a));
+  --fg: #e7e7e7;
+  --muted: #a1a1aa;
+  --border: rgba(255, 255, 255, 0.12);
+  --divider: rgba(255, 255, 255, 0.10);
+  --src-bg: rgba(255, 255, 255, 0.06);
+  --hover: rgba(255, 255, 255, 0.08);
+  --active: rgba(255, 255, 255, 0.12);
+  --accent: #49cee9;
+  --accent-soft: rgba(73, 206, 233, 0.14);
+  --danger: #f87171;
+  --shadow: 0 2px 3px rgba(0, 0, 0, 0.30), 0 8px 22px rgba(0, 0, 0, 0.35);
+  --glass-edge: rgba(255, 255, 255, 0.10);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  color: var(--fg);
+  font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The window itself is the frosted panel (acrylic/mica + OS-rounded corners), so this is
+   only a layout container: no margin, no background, no border, no second shadow. Painting
+   a card here is what previously produced a translucent frame around a white box. */
+.card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+/* header */
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--divider);
+  flex: 0 0 auto;
+}
+.title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.title .model {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+.think-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.think-badge:empty { display: none; }
+
+.win-btns { display: flex; gap: 2px; flex: 0 0 auto; }
+.wb {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.1s, color 0.1s;
+}
+.wb:hover { background: var(--hover); color: var(--fg); }
+
+/* reasoning panel */
+.think {
+  margin: 10px 14px 0;
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--src-bg);
+  flex: 0 0 auto;
+}
+.think[hidden] { display: none; }
+.think summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.think[open] summary { border-bottom: 1px solid var(--divider); }
+.think-label { font-weight: 600; color: var(--fg); }
+.think-state { font-size: 11.5px; }
+.think-text {
+  padding: 9px 10px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 150px;
+  overflow: auto;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* source text */
+.src {
+  margin: 10px 14px 0;
+  padding: 9px 11px;
+  background: var(--src-bg);
+  border-radius: 8px;
+  flex: 0 0 auto;
+  max-height: 92px;
+  overflow: auto;
+}
+.src-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  letter-spacing: 0.03em;
+}
+.src-text {
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 56px;
+  overflow: hidden;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* result */
+.out {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 56px;
+  margin: 12px 14px 0;
+  overflow: auto;
+}
+.out-text {
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 100%;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.out-text .caret {
+  display: inline-block;
+  width: 2px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: blink 1s step-start infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+.empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.empty.hidden { display: none; }
+.empty.error { color: var(--danger); }
+
+/* footer */
+.foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 13px;
+  flex: 0 0 auto;
+}
+.foot-gap { flex: 1 1 auto; }
+
+.btn {
+  height: 30px;
+  padding: 0 12px;
+  border: 0.5px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background-color 0.1s, color 0.1s;
+}
+.btn:hover { background: var(--hover); }
+.btn:active { background: var(--active); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn:disabled:hover { background: transparent; }
+
+/* the one accent button */
+.btn.accent {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+  font-weight: 550;
+}
+.btn.accent:hover { background: var(--accent-soft); filter: brightness(0.97); }
+
+/* Small colour dot before the action name, mirroring the toolbar's colour coding. */
+.title::before {
+  content: '';
+  flex: 0 0 auto;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--c, var(--accent));
+}
