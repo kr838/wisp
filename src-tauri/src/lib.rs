@@ -1488,34 +1488,51 @@ pub fn run() {
             // `--selftest-panels` opens two result panels from fake selections and logs the
             // resulting window labels. Multi-window support is otherwise only observable by
             // clicking the toolbar twice, which cannot be automated reliably.
+            //
+            // With `--selftest-stream` both panels also run a turn CONCURRENTLY against the
+            // configured provider. That is the case that used to cross-talk: the listeners
+            // were registered with target `Any`, so each window received the other window's
+            // chunks and the second answer streamed into the first window too.
             if std::env::args().any(|a| a == "--selftest-panels") {
                 let h = handle.clone();
+                let stream_both = std::env::args().any(|a| a == "--selftest-stream");
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(700)).await;
-                    for (i, text) in ["first selection", "second selection"].iter().enumerate() {
+                    let provider = store::load().providers.into_iter().next();
+                    let mut labels = Vec::new();
+                    for (i, text) in ["Rust", "JavaScript"].iter().enumerate() {
+                        let use_provider = if stream_both { provider.clone() } else { None };
                         let pending = PendingAction {
                             action: json!({ "id": "translate", "name": format!("selftest {}", i + 1), "color": "#3b6fe0" }),
                             text: (*text).into(),
                             program_name: "selftest".into(),
                             system_prompt: "reply ok".into(),
-                            provider: None,
-                            model_name: String::new(),
+                            provider: use_provider
+                                .as_ref()
+                                .map(|p| serde_json::to_value(p).unwrap_or(json!({}))),
+                            model_name: use_provider.as_ref().map(|p| p.model.clone()).unwrap_or_default(),
                             thinking_level: "off".into(),
                             thinking_supported: false,
                             window_label: String::new(),
                         };
                         match new_panel(&h, pending) {
-                            Ok(label) => crate::dlogf!("SELFTEST panel opened: {label}"),
+                            Ok(label) => {
+                                crate::dlogf!("SELFTEST panel opened: {label} <- {text}");
+                                labels.push(label);
+                            }
                             Err(e) => crate::dlogf!("SELFTEST panel FAILED: {e}"),
                         }
                     }
-                    let labels: Vec<String> = h
-                        .webview_windows()
-                        .keys()
-                        .filter(|l| l.starts_with("action-"))
-                        .cloned()
-                        .collect();
-                    crate::dlogf!("SELFTEST panels now: {} {:?}", labels.len(), labels);
+
+                    // The renderer already starts its own turn when it loads and finds a
+                    // provider in its context, so nothing is triggered here: the two panels
+                    // simply stream concurrently, which is the case that used to cross-talk
+                    // (listeners were registered with the unscoped target `Any`).
+                    crate::dlogf!(
+                        "SELFTEST panels now: {} {:?} (streaming={stream_both})",
+                        labels.len(),
+                        labels
+                    );
                 });
             }
             Ok(())

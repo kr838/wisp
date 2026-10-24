@@ -15,6 +15,17 @@
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 
+/**
+ * Listen for an event addressed to THIS window only.
+ *
+ * `listen(name, fn)` registers with target `{kind:"Any"}`, which the Tauri event router
+ * matches unconditionally — so every result window received every other window's chunks.
+ * With two panels open, the answer meant for `action-2` was also appended to `action-1`.
+ * Targeting the current window label keeps each panel to its own stream.
+ */
+const myLabel = window.__TAURI__.window.getCurrentWindow().label
+const onOwn = (name, handler) => listen(name, handler, { target: myLabel })
+
 const $ = (id) => document.getElementById(id)
 const els = {
   name: $('name'),
@@ -280,29 +291,29 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') invoke('action_close')
 })
 
-listen('action-start', () => begin())
-listen('action-turn', (e) => {
+onOwn('action-start', () => begin())
+onOwn('action-turn', (e) => {
   // A follow-up turn: show the question, then open a fresh answer block.
   const user = e && e.payload ? e.payload.user : ''
   addQuestion(user || '')
   setEmpty('')
   beginAnswer()
 })
-listen('action-reasoning', (e) => {
+onOwn('action-reasoning', (e) => {
   reasoning += e.payload
   paintReasoning()
 })
-listen('action-chunk', (e) => {
+onOwn('action-chunk', (e) => {
   setEmpty('')
   appendChunk(e.payload)
 })
-listen('action-done', (e) => {
+onOwn('action-done', (e) => {
   setBusy(false)
   paintReasoning()
   finishAnswer(e.payload)
   setEmpty('')
 })
-listen('action-error', (e) => {
+onOwn('action-error', (e) => {
   setBusy(false)
   paintReasoning()
   if (currentText) {
@@ -314,7 +325,7 @@ listen('action-error', (e) => {
   // Retry is only meaningful once a turn has failed.
   els.retry.hidden = false
 })
-listen('action-aborted', () => {
+onOwn('action-aborted', () => {
   setBusy(false)
   paintReasoning()
   if (currentText) finishAnswer()

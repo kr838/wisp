@@ -12,6 +12,7 @@
 const http = require('http')
 
 const port = Number(process.argv[2] || 8799)
+let REQ_SEQ = 0 // lets a caller tell two concurrent replies apart
 
 const server = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url.endsWith('/chat/completions')) {
@@ -25,7 +26,9 @@ const server = http.createServer((req, res) => {
       } catch {
         roles = ['<unparsable>']
       }
-      console.log('REQUEST roles=' + roles.join(','))
+      REQ_SEQ++
+      const seq = REQ_SEQ
+      console.log('REQUEST #' + seq + ' roles=' + roles.join(','))
 
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -33,7 +36,7 @@ const server = http.createServer((req, res) => {
         Connection: 'keep-alive'
       })
       const reasoning = ['用户', '想要', '翻译', '……']
-      const content = ['这是', '一个', '来自', '模拟', '模型的', '**流式**', '回复。']
+      const content = ['回复', '编号', String(seq), '：', '这是', '一个', '来自', '模拟', '模型的', '**流式**', '回复。']
       const all = [
         ...reasoning.map((c) => ({ field: 'reasoning_content', content: c })),
         ...content.map((c) => ({ field: 'content', content: c }))

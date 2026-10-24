@@ -105,15 +105,15 @@ html, body {
   background: var(--c, var(--accent));
   vertical-align: middle;
 }
-/* Model + thinking level sit on the title line, using space that was previously empty. */
+/* Model + thinking level sit immediately after the action name, on the same line, so the
+   metadata reads as part of the title instead of being pushed to the far right edge. */
 .meta {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
-  justify-content: flex-end;
-  margin-left: 4px;
+  margin-left: 2px;
 }
 .meta .model {
   font-size: 11.5px;
@@ -134,7 +134,8 @@ html, body {
   white-space: nowrap;
 }
 .think-badge[hidden] { display: none; }
-.win-btns { display: flex; gap: 2px; flex: 0 0 auto; }
+/* Pushes the window buttons to the right edge now that .meta no longer stretches. */
+.win-btns { display: flex; gap: 2px; flex: 0 0 auto; margin-left: auto; }
 .wb {
   width: 26px; height: 26px;
   border: none; border-radius: 6px;

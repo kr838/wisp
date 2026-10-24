@@ -9,15 +9,19 @@
     <div class="card">
       <!-- One header line, fully used: action name, then the model and thinking level in the
            space that was previously empty. The extra metadata costs no additional height. -->
-      <header class="head" data-tauri-drag-region>
+      <!-- `data-tauri-drag-region="deep"` makes the whole subtree draggable. The bare
+           attribute only reacts to clicks on the header element itself, which left just the
+           header's own padding as a hit area — a few pixels at the very top of the window.
+           Buttons opt out with data-tauri-drag-region="false" so they stay clickable. -->
+      <header class="head" data-tauri-drag-region="deep">
         <span class="name" id="name">处理</span>
         <span class="meta">
           <span class="model" id="model"></span>
           <span class="think-badge" id="think-badge" hidden></span>
         </span>
         <span class="win-btns">
-          <button class="wb" id="btn-copy" title="复制结果">⧉</button>
-          <button class="wb" id="btn-close" title="关闭">✕</button>
+          <button class="wb" id="btn-copy" title="复制结果" data-tauri-drag-region="false">⧉</button>
+          <button class="wb" id="btn-close" title="关闭" data-tauri-drag-region="false">✕</button>
         </span>
       </header>
 
