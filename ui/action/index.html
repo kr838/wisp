@@ -7,11 +7,14 @@
   </head>
   <body>
     <div class="card">
-      <!-- Minimal chrome: action name + two icon buttons. Model name and other metadata were
-           removed from the header — they cost a line of vertical space and are not needed
-           while reading the answer. -->
+      <!-- One header line, fully used: action name, then the model and thinking level in the
+           space that was previously empty. The extra metadata costs no additional height. -->
       <header class="head" data-tauri-drag-region>
         <span class="name" id="name">处理</span>
+        <span class="meta">
+          <span class="model" id="model"></span>
+          <span class="think-badge" id="think-badge" hidden></span>
+        </span>
         <span class="win-btns">
           <button class="wb" id="btn-copy" title="复制结果">⧉</button>
           <button class="wb" id="btn-close" title="关闭">✕</button>

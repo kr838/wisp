@@ -18,6 +18,8 @@ const { listen } = window.__TAURI__.event
 const $ = (id) => document.getElementById(id)
 const els = {
   name: $('name'),
+  model: $('model'),
+  badge: $('think-badge'),
   thinkWrap: $('think-wrap'),
   think: $('think'),
   thinkState: $('think-state'),
@@ -170,6 +172,13 @@ async function begin() {
 
   els.name.textContent = ctx.action.name || '处理'
   if (ctx.action.color) document.documentElement.style.setProperty('--c', ctx.action.color)
+
+  // Header metadata reuses the otherwise empty space on the title line, so it costs no
+  // extra height. The badge only appears when the model actually supports thinking.
+  els.model.textContent = ctx.provider ? ctx.modelName || '' : ''
+  const level = ctx.thinkingLevel
+  els.badge.hidden = !(ctx.thinkingSupported && level && level !== 'auto')
+  els.badge.textContent = els.badge.hidden ? '' : THINK_LABELS[level] || level
 
   // Source text: collapsed by default, with a length hint so it stays discoverable.
   const chars = (ctx.text || '').length

@@ -31,7 +31,14 @@ input[type=text], input[type=password], input[type=number], select, textarea {
 }
 input:focus, select:focus, textarea:focus { border-color:var(--accent); }
 textarea { resize:vertical; min-height:64px; line-height:1.5; }
+/* Two columns normally; a single column below ~520px so inputs do not force the card (and
+   the whole page) into horizontal scrolling when the window is narrow. The grid items need
+   `min-width:0` or a long value keeps the column at its intrinsic width. */
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.grid2 > * { min-width:0; }
+@media (max-width: 520px) {
+  .grid2 { grid-template-columns: 1fr; }
+}
 .switch {
   position:relative; width:42px; height:24px; border-radius:999px;
   background:rgba(120,126,148,.35); border:none; cursor:pointer; transition:background .15s; flex:0 0 auto;
@@ -49,16 +56,24 @@ textarea { resize:vertical; min-height:64px; line-height:1.5; }
 .btn.danger { color:var(--danger); border-color:rgba(229,72,77,.35); }
 .btn.danger:hover { background:rgba(229,72,77,.10); }
 .btn.sm { height:28px; padding:0 10px; font-size:12px; }
+/* Buttons must never wrap their label onto a second line when the window narrows: the flex
+   row used to squeeze them until "测试"/"删除" rendered vertically and overflowed the card. */
+.btn { white-space:nowrap; flex:0 0 auto; }
 .card-list { display:flex; flex-direction:column; gap:10px; }
 .item-card { border:1px solid var(--border); border-radius:10px; padding:12px; background:var(--bg); }
-.item-head { display:flex; align-items:center; gap:10px; }
+/* Wrap the action buttons onto a second line when the card is too narrow for the name and
+   the buttons side by side, instead of pushing them out of the card. */
+.item-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .item-head .emoji { width:30px; height:30px; display:flex; align-items:center; justify-content:center; border-radius:8px; background:var(--hover); font-size:16px; flex:0 0 auto; }
 .item-head .grow { flex:1 1 auto; min-width:0; }
-.item-head .nm { font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px; }
-.badge { font-size:10px; font-weight:500; padding:1px 6px; border-radius:999px; background:var(--hover); color:var(--accent); }
+.item-head .nm { font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px; min-width:0; }
+/* A long name must ellipsize rather than push the action buttons out of the card when the
+   window is narrow. */
+.item-head .nm > span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.badge { font-size:10px; font-weight:500; padding:1px 6px; border-radius:999px; background:var(--hover); color:var(--accent); flex:0 0 auto; }
 .badge.danger { background:rgba(229,72,77,.12); color:var(--danger); }
 .item-head .sub { font-size:11.5px; color:var(--muted); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.item-actions { display:flex; align-items:center; gap:6px; }
+.item-actions { display:flex; align-items:center; gap:6px; flex:0 0 auto; }
 .item-body { margin-top:12px; padding-top:12px; border-top:1px dashed var(--border); display:grid; gap:10px; }
 .hint-inline { font-size:11.5px; color:var(--muted); }
 .empty-state { color:var(--muted); font-size:12.5px; padding:14px 0; text-align:center; }
@@ -108,3 +123,65 @@ a.link { color:var(--accent); text-decoration:none; cursor:pointer; }
 .range-wrap { display: flex; align-items: center; gap: 10px; width: 100%; }
 .range-wrap input[type=range] { flex: 1 1 auto; accent-color: var(--accent); }
 .rangeval { flex: 0 0 42px; text-align: right; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ---- API key reveal toggle ---- */
+/* The wrapper owns the border so the eye button sits inside the input's visual box. */
+.secret {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  padding-right: 4px;
+}
+.secret:focus-within { border-color: var(--accent); }
+.secret input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 7px 10px;
+}
+.secret input:focus { border: none; }
+.eye {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background-color 0.1s, color 0.1s;
+}
+.eye:hover { background: var(--hover); color: var(--fg); }
+.eye.on { color: var(--accent); }
+.eye svg { display: block; }
+
+/* ---- scrollbars ---- */
+/* Same treatment as the result window: a thin tinted thumb on a transparent track, instead
+ * of the default grey scrollbar with arrows. */
+:root {
+  --scroll-thumb: rgba(24, 24, 27, 0.20);
+  --scroll-thumb-hover: rgba(24, 24, 27, 0.34);
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb);
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-thumb-hover); }
+::-webkit-scrollbar-corner { background: transparent; }

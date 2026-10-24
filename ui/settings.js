@@ -44,6 +44,21 @@ const THINKING_CAPS = [
   { value: 'off', label: '不支持' }
 ]
 
+/// Eye icons for the API-key reveal toggle (inline SVG so there is no icon dependency).
+///
+/// `hidden` is the default state and shows a plain eye ("click to reveal"); `shown` adds a
+/// slash ("click to hide"), which is the convention most password fields use.
+const EYE_ICONS = {
+  hidden:
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/>' +
+    '<circle cx="12" cy="12" r="3.2"/></svg>',
+  shown:
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/>' +
+    '<circle cx="12" cy="12" r="3.2"/><path d="M4 20 20 4"/></svg>'
+}
+
 const genId = (p) => p + '-' + Math.random().toString(36).slice(2, 9)
 function toast(m) {
   toastEl.textContent = m
@@ -207,8 +222,7 @@ function renderActions() {
           el('span', { text: a.name || '未命名' }),
           isLocal ? el('span', { class: 'badge', text: '本地' }) : null,
           a.enabled === false ? el('span', { class: 'badge danger', text: '已停用' }) : null
-        ]),
-        el('div', { class: 'sub', text: isLocal ? '不调用模型' : (a.prompt || '').replace(/\s+/g, ' ').slice(0, 60) })
+        ])
       ]),
       el('div', { class: 'item-actions' }, [
         iconBtn('↑', '上移', index === 0, () => moveAction(index, -1)),
@@ -324,8 +338,35 @@ function renderModels() {
       })
       return el('div', { class: 'field' }, [el('label', { text: label }), i])
     }
+    // API Key is masked by default, with an eye toggle to reveal it. Revealing is per-view
+    // and never persisted: the field starts hidden again next time the settings window opens.
+    const keyInput = onEnterSave(el('input', { type: 'password', value: p.apiKey != null ? p.apiKey : '', spellcheck: 'false', autocomplete: 'off' }))
+    keyInput.addEventListener('input', () => {
+      cur().apiKey = keyInput.value
+      scheduleSave({ providers: S.providers })
+    })
+    const eye = el('button', {
+      class: 'eye',
+      type: 'button',
+      title: '显示 API Key',
+      'aria-label': '显示 API Key',
+      'aria-pressed': 'false'
+    })
+    eye.innerHTML = EYE_ICONS.hidden
+    eye.addEventListener('click', () => {
+      const reveal = keyInput.type === 'password'
+      keyInput.type = reveal ? 'text' : 'password'
+      eye.innerHTML = reveal ? EYE_ICONS.shown : EYE_ICONS.hidden
+      eye.classList.toggle('on', reveal)
+      eye.title = reveal ? '隐藏 API Key' : '显示 API Key'
+      eye.setAttribute('aria-pressed', String(reveal))
+    })
+    const keyWrap = el('div', { class: 'secret' }, [keyInput, eye])
     body.appendChild(el('div', { class: 'grid2' }, [mk('名称', 'name'), mk('API 地址', 'apiBase')]))
-    body.appendChild(el('div', { class: 'grid2' }, [mk('API Key', 'apiKey', 'password'), mk('模型', 'model')]))
+    body.appendChild(el('div', { class: 'grid2' }, [
+      el('div', { class: 'field' }, [el('label', { text: 'API Key' }), keyWrap]),
+      mk('模型', 'model')
+    ]))
     const tempInput = onEnterSave(el('input', { type: 'number', value: p.temperature != null ? p.temperature : 0.7, min: '0', max: '2', step: '0.1' }))
     tempInput.addEventListener('input', () => { cur().temperature = parseFloat(tempInput.value); scheduleSave({ providers: S.providers }) })
     const capSel = el('select')

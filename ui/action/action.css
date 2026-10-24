@@ -29,6 +29,10 @@
   --accent-soft: rgba(59, 111, 224, 0.10);
   --danger: #dc2626;
   --user-bg: rgba(59, 111, 224, 0.08);
+  /* Scrollbar thumb: a neutral tint of the text colour, so it belongs to the surface instead
+     of the default grey track + arrow chrome. */
+  --scroll-thumb: rgba(24, 24, 27, 0.18);
+  --scroll-thumb-hover: rgba(24, 24, 27, 0.32);
 }
 :root[data-theme='dark'] {
   --bg: rgba(28, 28, 30, var(--glass-a));
@@ -44,6 +48,8 @@
   --accent-soft: rgba(123, 162, 255, 0.16);
   --danger: #f87171;
   --user-bg: rgba(123, 162, 255, 0.12);
+  --scroll-thumb: rgba(255, 255, 255, 0.20);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.36);
 }
 /* Material "none" has no backdrop to reveal, so the surface must be opaque. */
 :root[data-material='none'] { --bg: #ffffff; }
@@ -88,6 +94,7 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 0 1 auto;
 }
 .name::before {
   content: '';
@@ -98,6 +105,35 @@ html, body {
   background: var(--c, var(--accent));
   vertical-align: middle;
 }
+/* Model + thinking level sit on the title line, using space that was previously empty. */
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-end;
+  margin-left: 4px;
+}
+.meta .model {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meta .model:empty { display: none; }
+.think-badge {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.think-badge[hidden] { display: none; }
 .win-btns { display: flex; gap: 2px; flex: 0 0 auto; }
 .wb {
   width: 26px; height: 26px;
@@ -260,3 +296,23 @@ html, body {
 .btn:disabled:hover { background: transparent; }
 .btn.accent { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 550; }
 .btn.accent:hover { filter: brightness(0.97); }
+
+/* ---- scrollbars ----
+ * The default Chromium scrollbar is a light grey track with grey arrows: it ignores the
+ * window's material and dark mode, so it reads as a foreign element against the frosted
+ * surface. A thin, transparent-track thumb that tints on hover matches the rest of the UI.
+ * `color-scheme` lets the native dark variant pick the right base when the thumb is idle. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb);
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--scroll-thumb-hover); }
+::-webkit-scrollbar-corner { background: transparent; }
