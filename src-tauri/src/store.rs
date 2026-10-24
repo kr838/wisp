@@ -8,9 +8,9 @@ use serde_json::{json, Value};
 
 /// One toolbar action.
 ///
-/// Every action is prompt-driven: `prompt` IS the instruction sent to the model. The
-/// `builtin` marker survives only to identify the two local actions that never call a
-/// model (`copy`, `search`); everything else is `"custom"`.
+/// An action IS its prompt: `prompt` is the instruction sent to the model, and nothing else
+/// describes what the action does. There is no action-type field — the two local actions that
+/// never call a model (复制 / 搜索) are recognised by their fixed id, see `is_local_action`.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Action {
     pub id: String,
@@ -23,9 +23,6 @@ pub struct Action {
     #[serde(default, skip_serializing)]
     #[allow(dead_code)]
     pub icon: String,
-    /// `"copy"` / `"search"` for the two local actions, otherwise `"custom"`.
-    #[serde(default = "default_custom")]
-    pub builtin: String,
     #[serde(default)]
     pub prompt: String,
     #[serde(default = "default_true")]
@@ -36,6 +33,16 @@ pub struct Action {
     pub provider_id: Option<String>,
 }
 
+/// Ids of the two actions that run locally and never call a model.
+pub const LOCAL_COPY: &str = "copy";
+pub const LOCAL_SEARCH: &str = "search";
+
+/// True for the built-in actions that run locally (copy to clipboard / open a search engine).
+/// They are identified by id because they are created once and cannot be re-typed in the UI.
+pub fn is_local_action(id: &str) -> bool {
+    id == LOCAL_COPY || id == LOCAL_SEARCH
+}
+
 fn default_true() -> bool {
     true
 }
@@ -44,9 +51,6 @@ fn default_inherit() -> String {
 }
 fn default_color() -> String {
     "#3b6fe0".into()
-}
-fn default_custom() -> String {
-    "custom".into()
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -215,28 +219,27 @@ pub const RAINBOW: &[&str] = &[
 ];
 
 fn default_actions() -> Vec<Action> {
-    let mk = |id: &str, name: &str, color: &str, builtin: &str, prompt: &str| Action {
+    let mk = |id: &str, name: &str, color: &str, prompt: &str| Action {
         id: id.into(),
         name: name.into(),
         color: color.into(),
         icon: String::new(),
-        builtin: builtin.into(),
         prompt: prompt.into(),
         enabled: true,
         thinking_level: "inherit".into(),
         provider_id: None,
     };
     // The four presets ship with their prompt filled in; the user can edit that text
-    // freely. Optional built-ins (copy/search) are present but OFF by default.
-    let mut copy = mk("copy", "复制", RAINBOW[4], "copy", "");
+    // freely. The two local actions (copy/search) are present but OFF by default.
+    let mut copy = mk(LOCAL_COPY, "复制", RAINBOW[4], "");
     copy.enabled = false;
-    let mut search = mk("search", "搜索", RAINBOW[5], "search", "");
+    let mut search = mk(LOCAL_SEARCH, "搜索", RAINBOW[5], "");
     search.enabled = false;
     vec![
-        mk("translate", "翻译", RAINBOW[0], "custom", crate::ai::PRESET_TRANSLATE),
-        mk("summarize", "总结", RAINBOW[1], "custom", crate::ai::PRESET_SUMMARIZE),
-        mk("explain", "解释", RAINBOW[2], "custom", crate::ai::PRESET_EXPLAIN),
-        mk("rewrite", "润色", RAINBOW[3], "custom", crate::ai::PRESET_REWRITE),
+        mk("translate", "翻译", RAINBOW[0], crate::ai::PRESET_TRANSLATE),
+        mk("summarize", "总结", RAINBOW[1], crate::ai::PRESET_SUMMARIZE),
+        mk("explain", "解释", RAINBOW[2], crate::ai::PRESET_EXPLAIN),
+        mk("rewrite", "润色", RAINBOW[3], crate::ai::PRESET_REWRITE),
         copy,
         search,
     ]
@@ -294,16 +297,15 @@ pub fn load() -> Settings {
         changed = true;
     }
 
-    // v2 -> v3: the action editor no longer has a type selector. Built-in actions carry
-    // their instruction in `prompt` and become plain custom actions; copy/search keep their
-    // marker because they run locally.
+    // v2 -> v3: the action editor no longer has a type selector, and the persisted action no
+    // longer carries a type at all. The presets keep their instructions in `prompt`, so an
+    // existing install must have its preset text baked in once. Their ids are the old builtin
+    // markers (`translate`, `summarize`, …), which is what makes this migration idempotent and
+    // independent of the removed field.
     if s.schema_version < CURRENT_SCHEMA {
         for a in s.actions.iter_mut() {
-            if a.builtin != "copy" && a.builtin != "search" {
-                if a.prompt.trim().is_empty() {
-                    a.prompt = crate::ai::builtin_prompt(&a.builtin).to_string();
-                }
-                a.builtin = "custom".into();
+            if !is_local_action(&a.id) && a.prompt.trim().is_empty() {
+                a.prompt = crate::ai::builtin_prompt(&a.id).to_string();
             }
         }
         s.schema_version = CURRENT_SCHEMA;

@@ -74,3 +74,22 @@ fn provider_tolerates_null_optional_numbers() {
     let v: Vec<Provider> = serde_json::from_value(payload).expect("nulls must parse");
     assert!(v[0].temperature.is_none());
 }
+
+#[test]
+fn legacy_action_with_builtin_field_still_deserializes() {
+    // Settings written by 1.0.x/1.1.0 carry a "builtin" marker. The type field is gone from
+    // the model now; serde must ignore it rather than rejecting the whole settings file.
+    #[derive(serde::Deserialize)]
+    struct Action {
+        id: String,
+        #[serde(default)]
+        prompt: String,
+    }
+    let payload = json!([
+        { "id": "translate", "builtin": "translate", "prompt": "old prompt", "enabled": true },
+        { "id": "copy", "builtin": "copy", "prompt": "", "enabled": false }
+    ]);
+    let acts: Vec<Action> = serde_json::from_value(payload).expect("legacy actions must still load");
+    assert_eq!(acts[0].prompt, "old prompt");
+    assert_eq!(acts[1].id, "copy");
+}

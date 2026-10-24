@@ -197,7 +197,8 @@ function renderActions() {
     // Resolve the CURRENT action on every edit: saving replaces `S` with fresh objects, so a
     // captured reference goes stale and the next keystroke would be discarded.
     const cur = () => (S.actions || []).find((x) => x.id === a.id) || a
-    const isLocal = a.builtin === 'copy' || a.builtin === 'search'
+    // The two local actions are identified by id; there is no action-type field.
+    const isLocal = a.id === 'copy' || a.id === 'search'
     const card = el('div', { class: 'item-card' + (a.enabled === false ? ' is-off' : '') })
     card.appendChild(el('div', { class: 'item-head' }, [
       el('span', { class: 'swatch', style: `background:${a.color || RAINBOW[0]}` }),
@@ -273,7 +274,7 @@ function renderActions() {
     text: '添加动作',
     onclick: () => {
       S.actions = S.actions || []
-      S.actions.push({ id: genId('act'), name: '新动作', color: RAINBOW[S.actions.length % RAINBOW.length], builtin: 'custom', prompt: '', enabled: true, thinkingLevel: 'inherit' })
+      S.actions.push({ id: genId('act'), name: '新动作', color: RAINBOW[S.actions.length % RAINBOW.length], prompt: '', enabled: true, thinkingLevel: 'inherit' })
       saveNow({ actions: S.actions }).then(render)
     }
   })]))

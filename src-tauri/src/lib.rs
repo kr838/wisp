@@ -406,13 +406,14 @@ fn run_action(app: AppHandle, action_id: String) -> Value {
         return json!({ "ok": false, "error": "没有选中文本" });
     };
 
-    // Local actions never call a model, so they must not require one.
-    if action.builtin == "copy" {
+    // Local actions never call a model, so they must not require one. They are recognised by
+    // their fixed id — there is no action-type field any more.
+    if action.id == store::LOCAL_COPY {
         selection::write_clipboard(&sel.text);
         hide_toolbar(&app);
         return json!({ "ok": true, "local": true });
     }
-    if action.builtin == "search" {
+    if action.id == store::LOCAL_SEARCH {
         let q = urlencode(&sel.text);
         let url = s.search_url.replace("{query}", &q);
         let _ = app.opener().open_url(url, None::<&str>);
