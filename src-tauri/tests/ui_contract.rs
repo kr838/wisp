@@ -47,14 +47,26 @@ fn header_is_a_deep_drag_region_with_clickable_buttons() {
         html.contains(r#"class="head" data-tauri-drag-region="deep""#),
         "the whole header must be draggable; the bare attribute only covered the header's own padding"
     );
-    // Window buttons sit inside the drag region, so they must opt out explicitly. Count only
-    // button elements: the surrounding comment also mentions the attribute.
-    let opt_out = html
-        .lines()
-        .filter(|l| l.contains("<button") && l.contains(r#"data-tauri-drag-region="false""#))
-        .count();
-    assert_eq!(
-        opt_out, 2,
-        "both window buttons must opt out of dragging so they stay clickable"
+    // Buttons inside the header sit within the drag region, so each must opt out explicitly.
+    // Only the header is inspected: the footer's buttons are outside the drag region.
+    let header: String = html
+        .split("<header")
+        .nth(1)
+        .and_then(|s| s.split("</header>").next())
+        .unwrap_or_default()
+        .to_string();
+    let buttons: Vec<&str> = header.lines().filter(|l| l.contains("<button")).collect();
+    assert!(!buttons.is_empty(), "the header must contain the close button");
+    for b in &buttons {
+        assert!(
+            b.contains(r#"data-tauri-drag-region="false""#),
+            "header button must opt out of dragging: {}",
+            b.trim()
+        );
+    }
+    // 复制结果 was removed: the header keeps only the close button.
+    assert!(
+        !html.contains("btn-copy"),
+        "the result window must not offer a copy button"
     );
 }

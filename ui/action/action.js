@@ -41,7 +41,6 @@ const els = {
   empty: $('empty'),
   stop: $('btn-stop'),
   retry: $('btn-retry'),
-  copy: $('btn-copy'),
   askInput: $('ask-input'),
   askBtn: $('btn-ask')
 }
@@ -52,9 +51,8 @@ let reasoning = ''
 let streaming = false
 /** Markdown container currently being streamed into. */
 let currentAnswer = null
-/** Raw text of the current answer / of the most recently finished one. */
+/** Raw text of the current answer. */
 let currentText = ''
-let lastAnswerText = ''
 /** Set when the first turn has been started, so a re-shown window does not double-run. */
 let started = false
 
@@ -143,7 +141,6 @@ function finishAnswer(finalText) {
   if (typeof finalText === 'string' && finalText && !currentText) currentText = finalText
   if (!currentAnswer) beginAnswer()
   renderMarkdown(currentAnswer, currentText)
-  lastAnswerText = currentText
   scrollThread()
 }
 
@@ -255,7 +252,6 @@ els.retry.addEventListener('click', () => {
   started = false
   streaming = false
   currentText = ''
-  lastAnswerText = ''
   reasoning = ''
   els.retry.hidden = true
   els.askInput.disabled = false
@@ -266,14 +262,6 @@ els.retry.addEventListener('click', () => {
   els.thread.appendChild(els.empty)
   currentAnswer = null
   begin()
-})
-els.copy.addEventListener('click', async () => {
-  const text = lastAnswerText || currentText
-  if (!text) return
-  await invoke('action_copy', { text })
-  const prev = els.copy.textContent
-  els.copy.textContent = '已复制'
-  setTimeout(() => (els.copy.textContent = prev), 1200)
 })
 $('btn-close').addEventListener('click', () => invoke('action_close'))
 

@@ -502,11 +502,6 @@ fn action_stop(window: WebviewWindow, app: AppHandle) {
 }
 
 #[tauri::command]
-fn action_copy(text: String) {
-    selection::write_clipboard(&text);
-}
-
-#[tauri::command]
 fn action_run(window: WebviewWindow, app: AppHandle) {
     let label = window.label().to_string();
     let (provider, level, generation, messages) = {
@@ -1316,7 +1311,6 @@ pub fn run() {
             action_run,
             action_ask,
             action_stop,
-            action_copy,
             action_close,
         ])
         .setup(|app| {
