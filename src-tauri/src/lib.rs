@@ -290,8 +290,12 @@ async fn test_provider(provider: store::Provider) -> Value {
     json!({ "ok": ok, "message": msg })
 }
 
+/// Open the settings window from the toolbar.
+///
+/// Async for the same reason as `run_action`: `show_settings` may create a window, and window
+/// creation cannot complete while the main thread is blocked inside the IPC callback.
 #[tauri::command]
-fn open_settings(app: AppHandle) {
+async fn open_settings(app: AppHandle) {
     show_settings(&app);
 }
 
@@ -390,8 +394,20 @@ fn new_panel(app: &AppHandle, pending: PendingAction) -> Result<String, String> 
     Ok(label)
 }
 
+/// Run an action and open its result panel.
+///
+/// This MUST stay `async`. A synchronous Tauri command executes inside the webview's IPC
+/// callback, which runs on the main thread. Creating a `WebviewWindow` from there deadlocks:
+/// window creation dispatches a task to the main thread and waits for it, but the main thread
+/// is still inside the IPC callback waiting for the command to return — so neither side can
+/// proceed. The visible symptom is exactly what the toolbar shows: the bar dims (its `busy`
+/// state) and no result window ever appears.
+///
+/// As an `async` command the body runs on the async runtime, so `build()` dispatches to a
+/// free main thread and returns normally. `--selftest-panels` always worked because it calls
+/// the same `new_panel` from a spawned task.
 #[tauri::command]
-fn run_action(app: AppHandle, action_id: String) -> Value {
+async fn run_action(app: AppHandle, action_id: String) -> Value {
     let s = store::load();
     let Some(action) = s.actions.iter().find(|a| a.id == action_id).cloned() else {
         return json!({ "ok": false, "error": "动作不存在" });

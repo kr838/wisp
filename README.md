@@ -103,10 +103,17 @@ g++ -std=c++17 -O2 -shared -o SelectionHook.dll -Wl,--out-implib,libSelectionHoo
     -lole32 -loleaut32 -luiautomationcore -loleacc -luser32 -lshell32 -lpsapi -lgdi32 \
     -static-libgcc -static-libstdc++ -static
 
-# 2) 打包安装程序（产物 src-tauri/target/release/bundle/nsis/Wisp_1.0.0_x64-setup.exe）
+# 2) 打包安装程序（产物 src-tauri/target/release/bundle/nsis/Wisp_<版本>_x64-setup.exe）
 cd ../src-tauri
 cp ../native/SelectionHook.dll .
 cargo tauri build --bundles nsis
+```
+
+> **注意 `cargo build` 与 `cargo tauri build` 的产物名不同。**
+> `cargo build --release` 生成 `target/release/selection-assistant.exe`（Cargo 包名），
+> 而在 `tauri build` 期间通过 `mainBinaryName` 重命名为 `target/release/wisp.exe`，
+> 安装包里用的就是后者。改完代码只跑 `cargo build` 再启动 `wisp.exe`，跑的其实是
+> **上一次打包的旧程序**——这个坑会让修复看起来"没生效"。
 ```
 
 ### 测试
