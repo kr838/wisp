@@ -1,27 +1,40 @@
 //! AI provider client (OpenAI-compatible) with thinking-level control.
 
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::store::Provider;
 
+/// Preset instructions. These are the *initial* content of each action's prompt field —
+/// the user edits them like any other prompt, and `store` migrates old installs to this
+/// shape so the action editor needs no type selector.
+pub const PRESET_TRANSLATE: &str = "你是一个专业翻译引擎。将用户提供的文本翻译出来：原文是中文则译成英文，其他语言则译成简体中文。只输出译文本身，不要添加解释、引号或前后缀。";
+pub const PRESET_SUMMARIZE: &str =
+    "你是一个内容摘要助手。用简体中文简要总结用户提供的文本的核心要点，使用简短的要点列表（最多 5 条）。只输出总结内容本身。";
+pub const PRESET_EXPLAIN: &str =
+    "你是一个知识讲解助手。用简体中文通俗易懂地解释用户提供的文本（术语、代码或概念），必要时给出例子。只输出解释内容本身。";
+pub const PRESET_REWRITE: &str =
+    "你是一个文字润色助手。在不改变原意的前提下润色用户提供的文本，使其更通顺、专业、简洁。只输出改写后的文本本身。";
+
+/// Instructions for the legacy built-in ids, used by the store migration.
 pub fn builtin_prompt(builtin: &str) -> &'static str {
     match builtin {
-        "translate" => "你是一个专业翻译引擎。将用户提供的文本翻译出来：原文是中文则译成英文，其他语言则译成简体中文。只输出译文本身，不要添加解释、引号或前后缀。",
-        "summarize" => "你是一个内容摘要助手。用简体中文简要总结用户提供的文本的核心要点，使用简短的要点列表（最多 5 条）。只输出总结内容本身。",
-        "explain" => "你是一个知识讲解助手。用简体中文通俗易懂地解释用户提供的文本（术语、代码或概念），必要时给出例子。只输出解释内容本身。",
-        "rewrite" => "你是一个文字润色助手。在不改变原意的前提下润色用户提供的文本，使其更通顺、专业、简洁。只输出改写后的文本本身。",
-        _ => "你是一个乐于助人的文本处理助手。按照用户的要求处理文本，只输出处理结果，不要添加额外说明。",
+        "translate" => PRESET_TRANSLATE,
+        "summarize" => PRESET_SUMMARIZE,
+        "explain" => PRESET_EXPLAIN,
+        "rewrite" => PRESET_REWRITE,
+        _ => "",
     }
 }
 
-pub fn system_prompt(builtin: &str, custom: &str) -> String {
-    let base = builtin_prompt(builtin);
-    if custom.trim().is_empty() {
-        base.to_string()
+/// The system prompt for an action: its own prompt text, with a neutral fallback when the
+/// user left it empty.
+pub fn system_prompt(prompt: &str) -> String {
+    let p = prompt.trim();
+    if p.is_empty() {
+        "你是文本处理助手。按用户的要求处理文本，只输出处理结果。".to_string()
     } else {
-        format!("{base}\n\n附加要求：{custom}")
+        p.to_string()
     }
 }
 
@@ -56,8 +69,8 @@ pub fn supports_thinking(provider: &Provider) -> bool {
         _ => {
             let m = provider.model.to_lowercase();
             [
-                "deepseek", "reasoner", "thinking", "qwen", "qwq", "glm", "kimi", "moonshot", "claude", "gemini",
-                "magistral", "gpt-oss", "o1", "o3", "o4",
+                "deepseek", "reasoner", "thinking", "qwen", "qwq", "glm", "kimi", "moonshot", "claude",
+                "gemini", "magistral", "gpt-oss", "o1", "o3", "o4",
             ]
             .iter()
             .any(|k| m.contains(k))
@@ -74,7 +87,7 @@ pub fn supports_thinking(provider: &Provider) -> bool {
 ///   - A descriptive User-Agent is requested by OpenCode and is good practice generally.
 /// Any user-supplied headers win over the defaults.
 fn apply_headers(mut req: reqwest::RequestBuilder, provider: &Provider) -> reqwest::RequestBuilder {
-    req = req.header("User-Agent", "Wisp/1.0 (+https://github.com/)");
+    req = req.header("User-Agent", concat!("Wisp/", env!("CARGO_PKG_VERSION")));
     if !provider.api_key.trim().is_empty() {
         req = req.header("Authorization", format!("Bearer {}", provider.api_key.trim()));
     }
@@ -102,24 +115,9 @@ fn apply_headers(mut req: reqwest::RequestBuilder, provider: &Provider) -> reqwe
 /// One message in a conversation.
 ///
 /// Follow-up questions need the whole history, so requests are built from a message list
-/// rather than a fixed (system, user) pair.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
-
-impl ChatMessage {
-    pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: content.into() }
-    }
-    pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: content.into() }
-    }
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: content.into() }
-    }
-}
+/// rather than a fixed (system, user) pair. The definition lives in `chat.rs` so the panel
+/// state machine can be tested without this module's HTTP client.
+pub use crate::chat::ChatMessage;
 
 /// Build the request body, adding provider-specific thinking parameters only when
 /// the level is meaningful (so plain "auto" stays a vanilla OpenAI call).
@@ -162,6 +160,8 @@ pub fn build_body(provider: &Provider, messages: &[ChatMessage], level: &str, st
             "google": { "thinking_config": { "thinking_budget": if disabled { 0 } else if level == "high" { 8192 } else { 2048 } } }
         });
     } else {
+        // `reasoning_effort` only accepts none/low/medium/high; send `none` to disable and
+        // nothing else when the gateway might reject unknown levels.
         body["reasoning_effort"] = json!(if disabled { "none" } else { level });
         if model.contains("qwen") || model.contains("qwq") {
             body["enable_thinking"] = json!(!disabled);
@@ -212,12 +212,40 @@ fn extract_reasoning(v: &Value) -> String {
     if let Some(arr) = d.get("content").and_then(|c| c.as_array()) {
         return arr
             .iter()
-            .filter(|p| matches!(p.get("type").and_then(|t| t.as_str()), Some("thinking") | Some("reasoning")))
+            .filter(|p| {
+                matches!(p.get("type").and_then(|t| t.as_str()), Some("thinking") | Some("reasoning"))
+            })
             .filter_map(|p| p.get("thinking").and_then(|t| t.as_str()))
             .collect::<Vec<_>>()
             .join("");
     }
     String::new()
+}
+
+/// Incremental SSE line splitter and small text helpers.
+///
+/// They live in `sse.rs` so an integration test can exercise them without the Tauri runtime
+/// (see `tests/sse.rs`).
+pub use crate::sse::{truncate_chars, SseBuffer};
+
+/// Parse one SSE `data:` payload, returning (answer text, reasoning text).
+fn parse_sse_data(data: &str) -> Result<(String, String), String> {
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return Ok((String::new(), String::new()));
+    }
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return Ok((String::new(), String::new()));
+    };
+    if let Some(err) = v.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| err.as_str())
+            .unwrap_or("模型返回错误");
+        return Err(msg.to_string());
+    }
+    Ok((extract_delta(&v), extract_reasoning(&v)))
 }
 
 /// Stream a completion. `on_chunk` receives answer text, `on_reasoning` thinking text.
@@ -235,10 +263,10 @@ where
     if provider.model.is_empty() {
         return Err("未配置模型".into());
     }
-    let url = endpoint(&provider.api_base);
     if provider.api_base.trim().is_empty() {
         return Err("API 地址为空".into());
     }
+    let url = endpoint(&provider.api_base);
     let body = build_body(provider, messages, level, true);
 
     let client = reqwest::Client::new();
@@ -247,12 +275,12 @@ where
     if !res.status().is_success() {
         let status = res.status();
         let detail = res.text().await.unwrap_or_default();
-        let detail = &detail[..detail.len().min(400)];
+        let detail = truncate_chars(&detail, 400);
         return Err(format!("HTTP {status}: {detail}"));
     }
 
     let mut stream = res.bytes_stream();
-    let mut buf = String::new();
+    let mut sse = SseBuffer::default();
     let mut out = StreamResult {
         text: String::new(),
         reasoning: String::new(),
@@ -260,29 +288,29 @@ where
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| format!("流读取失败: {e}"))?;
-        buf.push_str(&String::from_utf8_lossy(&bytes));
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].trim().to_string();
-            buf.drain(..=pos);
+        for line in sse.push(&bytes) {
             let Some(data) = line.strip_prefix("data:") else { continue };
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
-                continue;
+            let (delta, reasoning) = parse_sse_data(data)?;
+            if !reasoning.is_empty() {
+                out.reasoning.push_str(&reasoning);
+                on_reasoning(&reasoning);
             }
-            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
-            if let Some(err) = v.get("error") {
-                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("模型返回错误");
-                return Err(msg.to_string());
+            if !delta.is_empty() {
+                out.text.push_str(&delta);
+                on_chunk(&delta);
             }
-            let r = extract_reasoning(&v);
-            if !r.is_empty() {
-                out.reasoning.push_str(&r);
-                on_reasoning(&r);
+        }
+    }
+    if let Some(line) = sse.finish() {
+        if let Some(data) = line.strip_prefix("data:") {
+            let (delta, reasoning) = parse_sse_data(data)?;
+            if !reasoning.is_empty() {
+                out.reasoning.push_str(&reasoning);
+                on_reasoning(&reasoning);
             }
-            let d = extract_delta(&v);
-            if !d.is_empty() {
-                out.text.push_str(&d);
-                on_chunk(&d);
+            if !delta.is_empty() {
+                out.text.push_str(&delta);
+                on_chunk(&delta);
             }
         }
     }
@@ -305,13 +333,24 @@ pub async fn test_provider(provider: &Provider) -> (bool, String) {
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
             if !status.is_success() {
-                let d = &text[..text.len().min(300)];
-                return (false, format!("HTTP {status}: {d}"));
+                return (false, format!("HTTP {status}: {}", truncate_chars(&text, 300)));
             }
             let v: Value = serde_json::from_str(&text).unwrap_or(json!({}));
             let msg = extract_delta(&v);
-            (true, if msg.is_empty() { "(空响应，但连接成功)".into() } else { msg.chars().take(60).collect() })
+            let msg = if msg.is_empty() { "(空响应，但连接成功)".to_string() } else { msg };
+            (true, truncate_chars(&msg, 60))
         }
         Err(e) => (false, format!("{e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_error_payload_surfaces_message() {
+        let e = parse_sse_data("{\"error\":{\"message\":\"boom\"}}").unwrap_err();
+        assert_eq!(e, "boom");
     }
 }

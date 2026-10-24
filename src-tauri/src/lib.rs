@@ -6,14 +6,18 @@
 //!
 //! # Window model
 //!
-//! | window    | role                                   | topmost | size            |
-//! |-----------|----------------------------------------|---------|-----------------|
-//! | `toolbar` | floating action bar near the selection | yes     | content-sized   |
-//! | `action`  | streaming result panel                 | yes     | resizable       |
-//! | `settings`| configuration (native frame)           | no      | fixed           |
+//! | window        | role                                   | topmost | size          |
+//! |---------------|----------------------------------------|---------|---------------|
+//! | `toolbar`     | floating action bar near the selection | yes     | content-sized |
+//! | `action`      | streaming result panel (one per action)| yes     | resizable     |
+//! | `action-<n>`  | additional result panels (multi-open)  | yes     | resizable     |
+//! | `settings`    | configuration (native frame)           | no      | fixed         |
 //!
-//! Only the two floating windows are always-on-top; the settings window is a normal window so
-//! the user can switch away from it without minimising.
+//! Only the floating windows are always-on-top; the settings window is a normal window so
+//! the user can switch away from it without minimising. Result panels are created on demand
+//! and destroyed when closed, so any number of results can be open at once — the previous
+//! single fixed `action` window was reused and therefore replaced whatever the user was
+//! reading.
 //!
 //! # Sizing / DPI note
 //!
@@ -24,19 +28,25 @@
 //! asynchronously and the stale value misplaces the toolbar.
 
 mod ai;
+mod chat;
+mod panels;
 mod selection;
+pub mod sse;
 mod store;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
-    AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use tauri_plugin_opener::OpenerExt;
 
+/// Everything one open result panel needs to know.
 #[derive(Clone, serde::Serialize)]
 struct PendingAction {
     action: Value,
@@ -52,51 +62,80 @@ struct PendingAction {
     thinking_level: String,
     #[serde(rename = "thinkingSupported")]
     thinking_supported: bool,
+    /// Window label of the panel this action runs in.
+    #[serde(rename = "windowLabel")]
+    window_label: String,
+}
+
+/// Everything a panel needs beyond its conversation: which action produced it, and the
+/// provider/model snapshot taken when it opened.
+struct Panel {
+    pending: PendingAction,
+}
+
+impl Panel {
+    fn provider(&self) -> Option<store::Provider> {
+        let p = self.pending.provider.clone()?;
+        serde_json::from_value::<store::Provider>(p).ok()
+    }
+    fn level(&self) -> String {
+        self.pending.thinking_level.clone()
+    }
+}
+
+/// All open panels. The conversation state machine lives in `panels` (pure logic, unit-tested);
+/// this map only holds the per-window provider snapshot and action metadata.
+struct PanelsState {
+    meta: HashMap<String, Panel>,
+    conv: panels::Panels,
+}
+
+impl Default for PanelsState {
+    fn default() -> Self {
+        PanelsState { meta: HashMap::new(), conv: panels::Panels::default() }
+    }
 }
 
 struct State {
     last_selection: Mutex<Option<selection::SelectionPayload>>,
-    pending: Mutex<Option<PendingAction>>,
-    streaming: AtomicBool,
-    /// Conversation history for the open result window: [system, user, assistant, user, ...].
-    /// Kept here so 追问 can continue the same context; reset whenever a new action starts.
-    conversation: Mutex<Vec<ai::ChatMessage>>,
+    panels: Mutex<PanelsState>,
+    /// Toolbar width reported by the renderer, in CSS pixels.
     toolbar_width: Mutex<f64>,
     /// The webview's own device pixel ratio (from the renderer). It can differ from the
     /// window's `scale_factor`, and window sizing must use this one.
     toolbar_dpr: Mutex<f64>,
-    /// CSS size we last asked the window to become, used to derive the true
-    /// logical->viewport conversion (which is not reliably derivable from devicePixelRatio).
-    toolbar_last_req: Mutex<(f64, f64)>,
-
-
-    /// Anchor (center_x, top_y, bottom_y) of the current toolbar placement, so the
-    /// window can be positioned once its content has rendered and width is known.
+    /// Anchor (center_x, top_y, bottom_y) of the current toolbar placement, in physical px.
     toolbar_anchor: Mutex<Option<(f64, f64, f64)>>,
     /// True while the toolbar content is being rendered off-screen; it is shown by
     /// `toolbar_report_size` once the real size is known (avoids a visible size jump).
     show_pending: AtomicBool,
+    /// Serialises panel creation so two rapid action clicks cannot both create a window.
+    panel_seq: AtomicU64,
+    /// The tray's "启用 Wisp" check item, kept so its state can be flipped in place instead
+    /// of rebuilding the whole native menu (which leaked handles on every save).
+    tray_enabled_item: Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>,
+    /// Result-window geometry, remembered across panels so a resized panel reopens at the
+    /// size the user chose instead of the hard-coded default.
+    panel_size: Mutex<Option<(f64, f64)>>,
 }
 
 impl Default for State {
     fn default() -> Self {
         State {
             last_selection: Mutex::new(None),
-            pending: Mutex::new(None),
-            streaming: AtomicBool::new(false),
-            conversation: Mutex::new(Vec::new()),
+            panels: Mutex::new(PanelsState::default()),
             toolbar_width: Mutex::new(360.0),
             toolbar_dpr: Mutex::new(1.0),
-            toolbar_last_req: Mutex::new((0.0, 0.0)),
-
-
             toolbar_anchor: Mutex::new(None),
             show_pending: AtomicBool::new(false),
+            panel_seq: AtomicU64::new(0),
+            tray_enabled_item: Mutex::new(None),
+            panel_size: Mutex::new(None),
         }
     }
 }
 
-/// Preview mode (`--preview`): keep the toolbar visible instead of hiding it on blur, so
+/// Preview mode (`--preview`): keep the toolbar visible instead of hiding it, so
 /// the UI can be inspected without a real selection.
 static PREVIEW: AtomicBool = AtomicBool::new(false);
 
@@ -173,8 +212,18 @@ fn pick_provider(s: &store::Settings, action_provider: Option<&str>) -> Option<s
     Some(usable[0].clone())
 }
 
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b' ' => "%20".to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
-// Commands
+// Commands: settings
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
@@ -219,7 +268,7 @@ fn settings_set(app: AppHandle, patch: Value) -> Value {
     } else {
         selection::apply_config(&hook_config(&next));
     }
-    rebuild_tray(&app, &next);
+    update_tray(&app, &next);
     // Material / tint changes are native, so they must be pushed to the live windows.
     apply_material_all(&app);
     let _ = app.emit("settings-changed", settings_json(&next));
@@ -230,7 +279,8 @@ fn settings_set(app: AppHandle, patch: Value) -> Value {
 fn settings_reset(app: AppHandle) -> Value {
     let s = store::reset();
     let _ = selection::start(&hook_config(&s));
-    rebuild_tray(&app, &s);
+    update_tray(&app, &s);
+    let _ = app.emit("settings-changed", settings_json(&s));
     settings_json(&s)
 }
 
@@ -249,6 +299,10 @@ fn open_settings(app: AppHandle) {
 fn open_external(app: AppHandle, url: String) {
     let _ = app.opener().open_url(url, None::<&str>);
 }
+
+// ---------------------------------------------------------------------------
+// Commands: toolbar
+// ---------------------------------------------------------------------------
 
 fn hide_toolbar(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("toolbar") {
@@ -281,53 +335,70 @@ fn toolbar_get_state() -> Value {
     })
 }
 
+/// Copy the selection to the clipboard (the toolbar's local "复制" action).
 #[tauri::command]
 fn toolbar_copy(app: AppHandle, text: String) {
     selection::write_clipboard(&text);
     hide_toolbar(&app);
 }
 
-#[tauri::command]
-fn toolbar_search(app: AppHandle, text: String) {
-    let s = store::load();
-    let q = urlencode(&text);
-    let url = s.search_url.replace("{query}", &q);
-    let _ = app.opener().open_url(url, None::<&str>);
-    hide_toolbar(&app);
-}
+/// Pick the provider for an action and report whether AI can run at all.
+///
+/// The toolbar calls this before showing an error: a missing provider should open the
+/// settings window instead of silently doing nothing when an AI action is clicked.
+// ---------------------------------------------------------------------------
+// Commands: result panels
+// ---------------------------------------------------------------------------
 
-fn urlencode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            b' ' => "%20".to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+/// Create a new result panel and return its label.
+///
+/// Each click on an action opens a NEW window (`action-1`, `action-2`, …) instead of reusing
+/// one fixed window, so previous answers stay on screen. Windows are freed when closed (see
+/// the `Destroyed` handler), which bounds the number of live webviews.
+fn new_panel(app: &AppHandle, pending: PendingAction) -> Result<String, String> {
+    let n = app.state::<State>().panel_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let label = format!("action-{n}");
+    let mut p = pending.clone();
+    p.window_label = label.clone();
+
+    {
+        let st = app.state::<State>();
+        let mut panels = st.panels.lock().unwrap();
+        panels.meta.insert(label.clone(), Panel { pending: p.clone() });
+        panels.conv.open(&label, &ai::system_prompt(&pending.system_prompt), &pending.text);
+    }
+
+    build_action(app, &label).map_err(|e| {
+        // Do not leave a panel entry behind for a window that was never created: it would
+        // keep a provider snapshot and a conversation alive for the rest of the session.
+        if let Some(st) = app.try_state::<State>() {
+            let mut panels = st.panels.lock().unwrap();
+            panels.meta.remove(&label);
+            panels.conv.remove(&label);
+        }
+        e
+    })?;
+    if let Some(w) = app.get_webview_window(&label) {
+        position_action(app, &w);
+        let _ = w.show();
+        let _ = w.set_focus();
+        // The renderer asks for its context on load; the event covers a panel that is
+        // already loaded (a second action in the same window label never happens, but the
+        // emit also gives the page a chance to start without a polling loop).
+        let _ = app.emit_to(&label, "action-start", p);
+    }
+    Ok(label)
 }
 
 #[tauri::command]
 fn run_action(app: AppHandle, action_id: String) -> Value {
     let s = store::load();
-    let action = s
-        .actions
-        .iter()
-        .find(|a| a.id == action_id)
-        .cloned()
-        .unwrap_or(store::Action {
-            id: action_id.clone(),
-            name: "处理".into(),
-            color: store::RAINBOW[0].into(),
-            icon: String::new(),
-            builtin: "custom".into(),
-            prompt: String::new(),
-            enabled: true,
-            thinking_level: "inherit".into(),
-            provider_id: None,
-        });
+    let Some(action) = s.actions.iter().find(|a| a.id == action_id).cloned() else {
+        return json!({ "ok": false, "error": "动作不存在" });
+    };
     let sel = {
-        let guard = app.state::<State>();
-        let g = guard.last_selection.lock().unwrap();
+        let st = app.state::<State>();
+        let g = st.last_selection.lock().unwrap();
         g.clone()
     };
     let Some(sel) = sel else {
@@ -335,15 +406,12 @@ fn run_action(app: AppHandle, action_id: String) -> Value {
         return json!({ "ok": false, "error": "没有选中文本" });
     };
 
+    // Local actions never call a model, so they must not require one.
     if action.builtin == "copy" {
         selection::write_clipboard(&sel.text);
         hide_toolbar(&app);
         return json!({ "ok": true, "local": true });
     }
-
-    // Search is a normal (default-off) action: open the configured engine with the
-    // selected text. Keeping it in the action list rather than hardcoding a button is what
-    // lets the user enable/rename/reorder it from 设置 → 动作.
     if action.builtin == "search" {
         let q = urlencode(&sel.text);
         let url = s.search_url.replace("{query}", &q);
@@ -365,55 +433,55 @@ fn run_action(app: AppHandle, action_id: String) -> Value {
         .unwrap_or_else(|| "auto".into());
     let supported = provider.as_ref().map(ai::supports_thinking).unwrap_or(false);
 
-    // Fresh conversation for this action: system prompt + the selected text.
-    {
-        let st = app.state::<State>();
-        let mut conv = st.conversation.lock().unwrap();
-        conv.clear();
-        conv.push(ai::ChatMessage::system(ai::system_prompt(&action.builtin, &action.prompt)));
-        conv.push(ai::ChatMessage::user(sel.text.clone()));
-    }
-
     let pending = PendingAction {
-        action: json!({ "id": action.id, "name": action.name, "icon": action.icon, "builtin": action.builtin }),
+        action: json!({ "id": action.id, "name": action.name, "color": action.color }),
         text: sel.text.clone(),
         program_name: sel.program_name.clone(),
-        system_prompt: ai::system_prompt(&action.builtin, &action.prompt),
+        system_prompt: ai::system_prompt(&action.prompt),
         model_name: provider.as_ref().map(|p| p.model.clone()).unwrap_or_default(),
         provider: provider.as_ref().map(|p| serde_json::to_value(p).unwrap_or(json!({}))),
         thinking_level: level,
         thinking_supported: supported,
+        window_label: String::new(),
     };
-    *app.state::<State>().pending.lock().unwrap() = Some(pending.clone());
 
     hide_toolbar(&app);
-    show_action(&app);
-    let _ = app.emit_to("action", "action-start", pending);
-    crate::dlogf!("[app] run_action {} -> action window shown", action_id);
-    json!({ "ok": true })
+    match new_panel(&app, pending) {
+        Ok(label) => {
+            crate::dlogf!("[app] run_action {} -> panel {label}", action_id);
+            json!({ "ok": true, "windowLabel": label })
+        }
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
 }
 
+/// Return the context for the calling panel.
 #[tauri::command]
-fn action_get_context(app: AppHandle) -> Value {
-    let guard = app.state::<State>();
-    let g = guard.pending.lock().unwrap();
-    match g.as_ref() {
-        Some(p) => serde_json::to_value(p).unwrap_or(json!(null)),
+fn action_get_context(window: WebviewWindow, app: AppHandle) -> Value {
+    let label = window.label().to_string();
+    let st = app.state::<State>();
+    let panels = st.panels.lock().unwrap();
+    match panels.meta.get(&label) {
+        Some(p) => serde_json::to_value(&p.pending).unwrap_or(json!(null)),
         None => json!(null),
     }
 }
 
 #[tauri::command]
-fn action_close(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("action") {
-        let _ = w.hide();
-    }
+fn action_close(window: WebviewWindow) {
+    // `close` runs the normal close path; the `Destroyed` hook then drops the panel state.
+    let _ = window.close();
 }
 
 #[tauri::command]
-fn action_stop(app: AppHandle) {
-    app.state::<State>().streaming.store(false, Ordering::SeqCst);
-    let _ = app.emit_to("action", "action-aborted", ());
+fn action_stop(window: WebviewWindow, app: AppHandle) {
+    let label = window.label().to_string();
+    {
+        let st = app.state::<State>();
+        let mut panels = st.panels.lock().unwrap();
+        panels.conv.stop(&label);
+    }
+    let _ = app.emit_to(&label, "action-aborted", ());
 }
 
 #[tauri::command]
@@ -422,117 +490,130 @@ fn action_copy(text: String) {
 }
 
 #[tauri::command]
-fn action_run(app: AppHandle) {
-    let pending = {
-        let guard = app.state::<State>();
-        let g = guard.pending.lock().unwrap();
-        g.clone()
+fn action_run(window: WebviewWindow, app: AppHandle) {
+    let label = window.label().to_string();
+    let (provider, level, generation, messages) = {
+        let st = app.state::<State>();
+        let mut panels = st.panels.lock().unwrap();
+        let Some(meta) = panels.meta.get(&label) else {
+            drop(panels);
+            let _ = app.emit_to(&label, "action-error", "窗口状态丢失，请关闭后重试");
+            return;
+        };
+        let Some(prov) = meta.provider() else {
+            drop(panels);
+            let _ = app.emit_to(&label, "action-error", "未配置 AI 模型，请先在设置中添加模型提供商");
+            return;
+        };
+        let level = meta.level();
+        // `begin` replays the first turn from the initial messages, so pressing 重试 after a
+        // failure sends the original request once instead of appending it again.
+        match panels.conv.begin(&label) {
+            Some((generation, messages)) => (prov, level, generation, messages),
+            None => {
+                drop(panels);
+                let _ = app.emit_to(&label, "action-error", "窗口状态丢失，请关闭后重试");
+                return;
+            }
+        }
     };
-    let Some(p) = pending else {
-        crate::dlogf!("[app] action_run: no pending action");
-        let _ = app.emit_to("action", "action-error", "没有可执行的动作");
-        return;
-    };
-    let Some(prov_val) = p.provider.clone() else {
-        crate::dlogf!("[app] action_run: no provider configured");
-        let _ = app.emit_to("action", "action-error", "未配置 AI 模型，请先在设置中添加模型提供商");
-        return;
-    };
-    let provider: store::Provider = serde_json::from_value(prov_val).unwrap_or_default();
-
-    let level = p.thinking_level.clone();
-    stream_conversation(&app, provider, level);
+    stream_panel(&app, &label, provider, level, generation, messages);
 }
 
-/// Stream the current conversation to the result window.
+/// Stream the panel's current conversation.
 ///
 /// Shared by the initial action and by 追问, so both paths emit exactly the same events
-/// (`action-chunk` / `action-reasoning` / `action-done` / `action-error`). The assistant
-/// reply is appended to the conversation so the next follow-up has full context.
-fn stream_conversation(app: &AppHandle, provider: store::Provider, level: String) {
-    app.state::<State>().streaming.store(true, Ordering::SeqCst);
-    let app2 = app.clone();
-    let messages = {
-        let st = app2.state::<State>();
-        let conv = st.conversation.lock().unwrap();
-        conv.clone()
-    };
-    crate::dlogf!("[app] stream model={} level={} turns={}", provider.model, level, messages.len());
+/// (`action-chunk` / `action-reasoning` / `action-done` / `action-error`). The assistant reply
+/// is appended to the conversation so the next follow-up has full context.
+///
+/// Every request carries a generation number. If the user stops the turn or asks a new
+/// question, the generation advances and the stale stream's events are dropped — that is what
+/// prevents a stopped answer from reappearing when the HTTP body finally arrives.
+fn stream_panel(
+    app: &AppHandle,
+    label: &str,
+    provider: store::Provider,
+    level: String,
+    generation: u64,
+    messages: Vec<ai::ChatMessage>,
+) {
+    crate::dlogf!("[app] stream {label} model={} level={} turns={}", provider.model, level, messages.len());
 
+    let app2 = app.clone();
+    let label_owned = label.to_string();
     tauri::async_runtime::spawn(async move {
         let app_chunk = app2.clone();
+        let label_chunk = label_owned.clone();
         let app_reason = app2.clone();
+        let label_reason = label_owned.clone();
         let res = ai::chat_stream(
             &provider,
             &messages,
             &level,
             move |t| {
-                let _ = app_chunk.emit_to("action", "action-chunk", t.to_string());
+                let _ = app_chunk.emit_to(&label_chunk, "action-chunk", t.to_string());
             },
             move |t| {
-                let _ = app_reason.emit_to("action", "action-reasoning", t.to_string());
+                let _ = app_reason.emit_to(&label_reason, "action-reasoning", t.to_string());
             },
         )
         .await;
 
-        // A stop between request and completion must not deliver a reply.
-        let streaming = app2.state::<State>().streaming.load(Ordering::SeqCst);
+        let st = app2.state::<State>();
+        let mut panels = st.panels.lock().unwrap();
         match res {
-            Ok(out) => {
-                crate::dlogf!("[app] stream done, textLen={}", out.text.chars().count());
-                if streaming {
-                    {
-                        let st = app2.state::<State>();
-                        st.conversation
-                            .lock()
-                            .unwrap()
-                            .push(ai::ChatMessage::assistant(out.text.clone()));
-                    }
-                    let _ = app2.emit_to("action", "action-done", out.text);
+            Ok(out) if !out.text.trim().is_empty() => {
+                crate::dlogf!("[app] stream done {label_owned} textLen={}", out.text.chars().count());
+                // `finish` refuses a superseded generation, so a stopped turn cannot append
+                // its answer after the user moved on.
+                if panels.conv.finish(&label_owned, generation, &out.text) {
+                    drop(panels);
+                    let _ = app2.emit_to(&label_owned, "action-done", out.text);
                 }
+            }
+            Ok(_) => {
+                panels.conv.fail(&label_owned, generation);
+                drop(panels);
+                let _ = app2.emit_to(&label_owned, "action-error", "模型没有返回内容");
             }
             Err(e) => {
-                crate::dlogf!("[app] stream error: {e}");
-                // Drop the unanswered user turn so a retry does not double-send it.
-                {
-                    let st = app2.state::<State>();
-                    let mut conv = st.conversation.lock().unwrap();
-                    if conv.last().map(|m| m.role == "user").unwrap_or(false) {
-                        conv.pop();
-                    }
-                }
-                if streaming {
-                    let _ = app2.emit_to("action", "action-error", e);
-                }
+                crate::dlogf!("[app] stream error {label_owned}: {e}");
+                panels.conv.fail(&label_owned, generation);
+                drop(panels);
+                let _ = app2.emit_to(&label_owned, "action-error", e);
             }
         }
-        app2.state::<State>().streaming.store(false, Ordering::SeqCst);
     });
 }
 
-/// Ask a follow-up question in the current result window.
+/// Ask a follow-up question in the calling panel.
 #[tauri::command]
-fn action_ask(app: AppHandle, text: String) -> Value {
+fn action_ask(window: WebviewWindow, app: AppHandle, text: String) -> Value {
+    let label = window.label().to_string();
     let text = text.trim().to_string();
     if text.is_empty() {
         return json!({ "ok": false, "error": "内容为空" });
     }
-    // Hold the managed state for the whole call; `app.state()` returns a borrowed guard and
-    // a temporary would not outlive the lock guard below.
-    let state = app.state::<State>();
-    let pending = state.pending.lock().unwrap().clone();
-    let Some(p) = pending else {
-        return json!({ "ok": false, "error": "没有进行中的动作" });
-    };
-    let Some(prov_val) = p.provider.clone() else {
-        return json!({ "ok": false, "error": "未配置 AI 模型" });
-    };
-    let provider: store::Provider = serde_json::from_value(prov_val).unwrap_or_default();
 
-    state.conversation.lock().unwrap().push(ai::ChatMessage::user(text.clone()));
-    // Tell the window to open a new turn before chunks start arriving.
-    let _ = app.emit_to("action", "action-turn", json!({ "user": text }));
-    stream_conversation(&app, provider, p.thinking_level.clone());
+    let (provider, level, generation, messages) = {
+        let st = app.state::<State>();
+        let mut panels = st.panels.lock().unwrap();
+        let Some(meta) = panels.meta.get(&label) else {
+            return json!({ "ok": false, "error": "窗口状态丢失，请关闭后重试" });
+        };
+        let Some(prov) = meta.provider() else {
+            return json!({ "ok": false, "error": "未配置 AI 模型" });
+        };
+        let level = meta.level();
+        match panels.conv.ask(&label, &text) {
+            // `ask` appends the question and starts the turn; `fail` pops it again on error.
+            Some((generation, messages)) => (prov, level, generation, messages),
+            None => return json!({ "ok": false, "error": "窗口状态丢失，请关闭后重试" }),
+        }
+    };
+
+    let _ = app.emit_to(&label, "action-turn", json!({ "user": text }));
+    stream_panel(&app, &label, provider, level, generation, messages);
     json!({ "ok": true })
 }
 
@@ -540,54 +621,54 @@ fn action_ask(app: AppHandle, text: String) -> Value {
 // Windows
 // ---------------------------------------------------------------------------
 
+/// Fixed toolbar height, matching Cherry Studio: the pill is 36px.
+const TOOLBAR_HEIGHT: f64 = 36.0;
+
+/// Width the hidden toolbar is stretched to while it measures its content. It must be
+/// wider than the tallest expected row, but is capped to the screen width so the window
+/// never extends off-screen (a clipped window makes the renderer under-report).
+const MEASURE_WIDTH: f64 = 900.0;
+/// Lower bound when reusing the previous width for the measuring pass.
+const MEASURE_WIDTH_MIN: f64 = 360.0;
+
 fn build_toolbar(app: &AppHandle) {
     if app.get_webview_window("toolbar").is_some() {
         return;
     }
     // focusable(false) sets WS_EX_NOACTIVATE: the toolbar still receives mouse clicks but
     // never takes keyboard focus, so the user keeps typing / using Ctrl+C in their own app.
-    // Cherry Studio's toolbar does exactly this on Windows.
     let built = WebviewWindowBuilder::new(app, "toolbar", WebviewUrl::App("toolbar/index.html".into()))
         .title("Wisp")
-        .inner_size(MEASURE_WIDTH, TOOLBAR_HEIGHT)
+        .inner_size(MEASURE_WIDTH_MIN, TOOLBAR_HEIGHT)
         .position(-10000.0, -10000.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
+        // `focused(false)` only avoids focusing the window when it is created; it does NOT
+        // prevent it from being activated later. `focusable(false)` is what sets
+        // WS_EX_NOACTIVATE, so clicking a chip cannot steal the keyboard from the app the
+        // text was selected in (that made typing and Ctrl+C stop working).
         .focused(false)
+        .focusable(false)
         // No OS shadow: it brings an invisible resize frame that eats into the client
-        // area and would clip the last chip. The CSS box-shadow provides the shadow
-        // instead — the same choice Cherry Studio's toolbar window makes.
+        // area and would clip the last chip. The CSS hairline provides the edge instead.
         .shadow(false)
         .visible(false)
         .build();
     if let Ok(w) = built {
-        apply_frosted_glass(&w);
+        apply_material(&w, &store::load());
     }
 }
 
-/// Give the window a real frosted-glass (acrylic) backdrop with rounded corners.
+/// Give a window the configured backdrop material with rounded corners.
 ///
-/// CSS `backdrop-filter` cannot blur the desktop behind a separate window, so the blur
-/// has to come from the OS. Rounding the window itself (rather than drawing a rounded
-/// pill inside a rectangular window) is what prevents the "rounded card floating in a
-/// translucent rectangle" look: the acrylic region then *is* the pill.
-fn apply_frosted_glass(w: &tauri::WebviewWindow) {
-    apply_material(w, &store::load());
-}
-
-/// Apply the configured backdrop material to a window.
-///
-/// The three materials differ in what they sample, which is the practical difference the
-/// user sees:
-///   - Mica (`DWMSBT_MAINWINDOW`) samples the **desktop wallpaper**; it barely blurs and
-///     therefore looks flat when the window floats over another app.
-///   - Mica Alt (`DWMSBT_TABBEDWINDOW`) is a higher-contrast variant of the same idea.
-///   - Acrylic (`DWMSBT_TRANSIENTWINDOW`) is real-time blur of **whatever is behind the
-///     window** — the classic frosted glass.
-fn apply_material(w: &tauri::WebviewWindow, s: &store::Settings) {
+/// CSS `backdrop-filter` cannot blur the desktop behind a separate window, so the blur has
+/// to come from the OS. Rounding the window itself (rather than drawing a rounded pill
+/// inside a rectangular window) is what prevents the "rounded card floating in a translucent
+/// rectangle" look: the acrylic region then *is* the surface.
+fn apply_material(w: &WebviewWindow, s: &store::Settings) {
     use window_vibrancy::{apply_acrylic, apply_mica, apply_tabbed, clear_acrylic, clear_mica};
 
     if w.hwnd().is_err() {
@@ -629,15 +710,16 @@ fn apply_material(w: &tauri::WebviewWindow, s: &store::Settings) {
 /// material settings change, so the switch is live rather than requiring a restart.
 fn apply_material_all(app: &AppHandle) {
     let s = store::load();
-    for label in ["toolbar", "action"] {
-        if let Some(w) = app.get_webview_window(label) {
+    for (_, w) in app.webview_windows() {
+        let label = w.label();
+        if label == "toolbar" || label.starts_with("action") {
             apply_material(&w, &s);
         }
     }
 }
 
 /// Ask DWM to round the window corners (Windows 11). Ignored on Windows 10.
-fn round_window_corners(w: &tauri::WebviewWindow) {
+fn round_window_corners(w: &WebviewWindow) {
     #[link(name = "dwmapi")]
     extern "system" {
         fn DwmSetWindowAttribute(hwnd: isize, attr: u32, value: *const core::ffi::c_void, size: u32) -> i32;
@@ -656,51 +738,46 @@ fn round_window_corners(w: &tauri::WebviewWindow) {
     }
 }
 
-fn build_action(app: &AppHandle) {
-    if app.get_webview_window("action").is_some() {
-        return;
-    }
+fn build_action(app: &AppHandle, label: &str) -> Result<(), String> {
+    // Reuse the size the user last chose, so resizing a panel has an effect on the next one.
+    let (w, h) = app.state::<State>().panel_size.lock().unwrap().unwrap_or((560.0, 460.0));
     // One surface only: the window itself is the frosted panel (acrylic/mica + rounded
-    // corners). The webview paints no background and no inset card, so there is no second
-    // layer and no translucent frame around the content.
-    let built = WebviewWindowBuilder::new(app, "action", WebviewUrl::App("action/index.html".into()))
+    // corners). The webview paints no background and no inset card.
+    let built = WebviewWindowBuilder::new(app, label, WebviewUrl::App("action/index.html".into()))
         .title("Wisp")
-        .inner_size(480.0, 420.0)
-        .min_inner_size(360.0, 220.0)
+        .inner_size(w, h)
+        .min_inner_size(360.0, 200.0)
         .decorations(false)
         .transparent(true)
-        .always_on_top(true)
+        // NOT always-on-top: several result panels are meant to stay open side by side, and a
+        // topmost panel covers the others (and the user's work) until it is closed. The
+        // toolbar stays topmost because it must appear over the app the text came from.
+        .always_on_top(false)
         .skip_taskbar(false)
         .resizable(true)
         // The OS shadow draws around the whole transparent rectangle, not the rounded
-        // panel, which is what produced the "big transparent frame" look. The panel draws
-        // its own shadow instead.
+        // panel, which is what produced the "big transparent frame" look.
         .shadow(false)
         .visible(false)
-        .build();
-    if let Ok(w) = built {
-        apply_frosted_glass(&w);
-    }
+        .build()
+        .map_err(|e| format!("创建结果窗口失败: {e}"))?;
+
+    apply_material(&built, &store::load());
+    Ok(())
 }
 
 /// Show the settings window.
 ///
-/// The result window is always-on-top and centred, so without this the settings window
-/// opens *underneath* it and looks like nothing happened. The settings window is therefore
-/// also made always-on-top, and the result window is hidden while it is used.
+/// The floating windows are hidden first so the settings window is not buried; settings
+/// itself stays a normal window (making it topmost kept it above every other app).
 fn show_settings(app: &AppHandle) {
-    // Clear the floating windows out of the way so the settings window is not buried —
-    // without making settings itself always-on-top, which would keep it above every other
-    // application until the user minimised it.
-    for label in ["action", "toolbar"] {
+    for label in ["toolbar"] {
         if let Some(w) = app.get_webview_window(label) {
             let _ = w.hide();
         }
     }
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.unminimize();
-        // Explicitly clear a topmost flag that an earlier build may have set; otherwise the
-        // window would stay pinned above other apps for this session.
         let _ = w.set_always_on_top(false);
         let _ = w.show();
         let _ = w.set_focus();
@@ -709,11 +786,11 @@ fn show_settings(app: &AppHandle) {
     }
     match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("Wisp · 设置")
-        .inner_size(880.0, 660.0)
+        .inner_size(880.0, 640.0)
         .min_inner_size(720.0, 520.0)
         .center()
         // Deliberately NOT always-on-top: settings is a normal window the user switches to
-        // and away from. Only the floating toolbar and the result popup belong on top.
+        // and away from. Only the floating toolbar and the result panels belong on top.
         .always_on_top(false)
         .build()
     {
@@ -725,18 +802,19 @@ fn show_settings(app: &AppHandle) {
     }
 }
 
-fn show_action(app: &AppHandle) {
-    if app.get_webview_window("action").is_none() {
-        build_action(app);
-    }
-    if let Some(w) = app.get_webview_window("action") {
-        position_action(app, &w);
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
-}
+/// Place a result panel: under the toolbar when "follow toolbar" is on, else centred.
+///
+/// Open panels cascade by a small offset, so a second result is visibly a second window
+/// instead of landing exactly on the first one.
+fn position_action(app: &AppHandle, w: &WebviewWindow) {
+    let existing = app
+        .webview_windows()
+        .keys()
+        .filter(|l| l.starts_with("action-"))
+        .count();
+    // Count includes the panel being placed, so the first one gets offset 0.
+    let step = (existing.saturating_sub(1) % 6) as f64 * 28.0;
 
-fn position_action(app: &AppHandle, w: &tauri::WebviewWindow) {
     let s = store::load();
     if s.follow_toolbar {
         if let Some(tb) = app.get_webview_window("toolbar") {
@@ -745,9 +823,24 @@ fn position_action(app: &AppHandle, w: &tauri::WebviewWindow) {
                 let scale = tb.scale_factor().unwrap_or(1.0).max(0.1);
                 let (x, y) = (tbpos.x as f64 / scale, tbpos.y as f64 / scale);
                 let h = tbsize.height as f64 / scale;
-                let _ = w.set_position(tauri::LogicalPosition::new(x, y + h + 6.0));
+                let _ = w.set_position(tauri::LogicalPosition::new(x + step, y + h + 6.0 + step));
                 return;
             }
+        }
+    }
+    if let Ok(size) = w.outer_size() {
+        if let Some(mon) = w.current_monitor().ok().flatten() {
+            let scale = mon.scale_factor().max(0.1);
+            let mw = mon.size().width as f64 / scale;
+            let mh = mon.size().height as f64 / scale;
+            let ww = size.width as f64 / scale;
+            let wh = size.height as f64 / scale;
+            let x = ((mw - ww) / 2.0 + step).max(0.0);
+            let y = ((mh - wh) / 2.0 + step).max(0.0);
+            let mx = mon.position().x as f64 / scale;
+            let my = mon.position().y as f64 / scale;
+            let _ = w.set_position(tauri::LogicalPosition::new(mx + x, my + y));
+            return;
         }
     }
     let _ = w.center();
@@ -757,7 +850,6 @@ fn position_action(app: &AppHandle, w: &tauri::WebviewWindow) {
 ///
 /// The window is *not* shown here: its content is rendered while hidden and the real
 /// size comes back through `toolbar_report_size`, which then positions and reveals it.
-/// Showing first would display the previous (wrong) width for a frame.
 fn show_toolbar_at(app: &AppHandle, payload: &selection::SelectionPayload) {
     if app.get_webview_window("toolbar").is_none() {
         build_toolbar(app);
@@ -766,16 +858,16 @@ fn show_toolbar_at(app: &AppHandle, payload: &selection::SelectionPayload) {
 
     // The low-level hook reports *physical* pixels. The anchor is stored raw here and
     // converted to logical pixels (DIP) in reveal_toolbar, where the window's scale
-    // factor is known to be settled (Cherry Studio does the same screenToDipPoint step).
+    // factor is known to be settled.
     // The clipboard fallback (Win32 edit controls and similar) returns text without
     // coordinates, so pos_level is 0 and every point is (0,0). Fall back to the live
-    // cursor position — the same thing Cherry Studio does for PositionLevel::NONE.
+    // cursor position.
     let no_position = payload.pos_level <= 0
         || (payload.ref_point.x == 0 && payload.ref_point.y == 0 && payload.mouse_pos_end.x == 0);
 
     let (anchor_x, below_y, anchor_bottom) = if no_position {
         let (px, py) = cursor_position();
-        (px as f64, py as f64 + 24.0, py as f64)
+        (px as f64, py as f64 + 10.0, py as f64)
     } else {
         match payload.pos_level {
             3 | 4 => (
@@ -785,7 +877,7 @@ fn show_toolbar_at(app: &AppHandle, payload: &selection::SelectionPayload) {
             ),
             _ => (
                 payload.mouse_pos_end.x as f64,
-                payload.mouse_pos_end.y as f64 + 24.0,
+                payload.mouse_pos_end.y as f64 + 18.0,
                 payload.mouse_pos_end.y as f64,
             ),
         }
@@ -794,14 +886,9 @@ fn show_toolbar_at(app: &AppHandle, payload: &selection::SelectionPayload) {
     *app.state::<State>().toolbar_anchor.lock().unwrap() = Some((anchor_x, below_y, anchor_bottom));
     app.state::<State>().show_pending.store(true, Ordering::SeqCst);
 
-    // Pre-widen the (still hidden) window before the renderer measures. A window narrower
+    // Pre-widen the (still hidden) window before the renderer measures: a window narrower
     // than the content compresses the row, so the reported width would be too small and the
-    // last action would be clipped — the measurement must be unconstrained. Reuse the last
-    // known width when it is larger, so the window never has to be stretched beyond the
-    // screen (which would make the renderer report a clipped width).
-    // Stretch to (almost) the monitor width in DIP: wide enough that the row is never
-    // compressed, yet still on-screen so the webview does not clip the content and report
-    // a wrong width.
+    // last action would be clipped.
     let last = *app.state::<State>().toolbar_width.lock().unwrap();
     let screen_dip = w
         .primary_monitor()
@@ -815,75 +902,50 @@ fn show_toolbar_at(app: &AppHandle, payload: &selection::SelectionPayload) {
         if d > 0.5 { d } else { w.scale_factor().unwrap_or(1.0).max(0.5) }
     };
     let mscale = w.scale_factor().unwrap_or(1.0).max(0.1);
-    let lw = css_to_logical(measure_w, mdpr, mscale);
-    let lh = css_to_logical(TOOLBAR_HEIGHT, mdpr, mscale);
-    let _ = w.set_size(tauri::LogicalSize::new(lw, lh));
-    *app.state::<State>().toolbar_last_req.lock().unwrap() = (lw, lh);
+    let _ = w.set_size(tauri::LogicalSize::new(
+        css_to_logical(measure_w, mdpr, mscale),
+        css_to_logical(TOOLBAR_HEIGHT, mdpr, mscale),
+    ));
     let _ = app.emit_to("toolbar", "toolbar-payload", payload.clone());
 
     // Fallback: if the renderer never reports a size, reveal the toolbar anyway so a
     // front-end error cannot make selection appear to do nothing.
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
         if app2.state::<State>().show_pending.swap(false, Ordering::SeqCst) {
-            reveal_toolbar(&app2, *app2.state::<State>().toolbar_width.lock().unwrap());
+            let width = *app2.state::<State>().toolbar_width.lock().unwrap();
+            reveal_toolbar(&app2, width);
         }
     });
-    let _ = w;
 }
 
-/// Fixed toolbar height, matching Cherry Studio: the pill is 36px plus 2px top and
-/// 5px bottom margin. The window height never changes; only the width is measured.
-const TOOLBAR_HEIGHT: f64 = 36.0;
-
-/// Width the hidden toolbar is stretched to while it measures its content. It must be
-/// wider than the tallest expected row, but is capped to the screen width so the window
-/// never extends off-screen (a clipped window makes the renderer under-report).
-const MEASURE_WIDTH: f64 = 900.0;
-/// Lower bound when reusing the previous width for the measuring pass.
-const MEASURE_WIDTH_MIN: f64 = 360.0;
-
-/// Position and show the toolbar using a known content width (CSS pixels == DIP).
-/// The stored anchor is in physical pixels and is converted here.
+/// Position and show the toolbar using a known content width (CSS pixels).
 fn reveal_toolbar(app: &AppHandle, width: f64) {
     let Some(w) = app.get_webview_window("toolbar") else { return };
     let anchor = *app.state::<State>().toolbar_anchor.lock().unwrap();
     let Some((anchor_x_px, below_y_px, anchor_bottom_px)) = anchor else { return };
 
-    // Sizing: physical = CSS * devicePixelRatio. Measured here: inner_size was 1344 physical
-    // while innerWidth was 750 CSS with scale_factor 1.5 — so the window's logical units are
-    // NOT the webview's CSS units (1.5 vs 1.8), and passing a CSS size as LogicalSize yields
-    // only ~83% of the intended viewport. devicePixelRatio is the ratio that is actually
-    // consistent with the physical/CSS relation, so derive both the size and the position
-    // from it.
-    //
-    // Nothing is read back from the window: a requested resize applies asynchronously, so
-    // `outer_size()` immediately after `set_size` still returns the previous size (observed:
-    // read 1620 while requesting 304), which placed the bar hundreds of px off-screen.
+    // Sizing: physical = CSS * devicePixelRatio. Read back from the window is unsafe (the
+    // resize is asynchronous), so both size and position are derived from that formula.
     let dpr = {
         let d = *app.state::<State>().toolbar_dpr.lock().unwrap();
-        if d > 0.5 {
-            d
-        } else {
-            w.scale_factor().unwrap_or(1.0).max(0.5)
-        }
+        if d > 0.5 { d } else { w.scale_factor().unwrap_or(1.0).max(0.5) }
     };
     let css_w = width.max(120.0);
     let w_px = (css_w * dpr).round();
     let h_px = (TOOLBAR_HEIGHT * dpr).round();
 
     let scale = w.scale_factor().unwrap_or(1.0).max(0.1);
-    let logical_w = css_to_logical(css_w, dpr, scale);
-    let logical_h = css_to_logical(TOOLBAR_HEIGHT, dpr, scale);
-    *app.state::<State>().toolbar_last_req.lock().unwrap() = (logical_w, logical_h);
-    let _ = w.set_size(tauri::LogicalSize::new(logical_w, logical_h));
+    let _ = w.set_size(tauri::LogicalSize::new(
+        css_to_logical(css_w, dpr, scale),
+        css_to_logical(TOOLBAR_HEIGHT, dpr, scale),
+    ));
 
-    let (anchor_x, below_y, anchor_bottom) = (anchor_x_px, below_y_px, anchor_bottom_px);
-    let mut x = anchor_x - w_px / 2.0;
-    let mut y = below_y;
+    let mut x = anchor_x_px - w_px / 2.0;
+    let mut y = below_y_px;
     // Clamp to the monitor containing the anchor, in physical pixels.
-    if let Some((mx, my, mw, mh)) = monitor_phys_at(app, anchor_x, below_y) {
+    if let Some((mx, my, mw, mh)) = monitor_phys_at(app, anchor_x_px, below_y_px) {
         let margin = 8.0;
         let max_x = mx + mw - w_px - margin;
         let max_y = my + mh - h_px - margin;
@@ -892,7 +954,7 @@ fn reveal_toolbar(app: &AppHandle, width: f64) {
         }
         if y > max_y {
             // Not enough room below: place it above the anchor.
-            y = (anchor_bottom - h_px - margin).max(my + margin);
+            y = (anchor_bottom_px - h_px - margin).max(my + margin);
         }
         x = x.max(mx + margin);
         y = y.max(my + margin);
@@ -900,16 +962,8 @@ fn reveal_toolbar(app: &AppHandle, width: f64) {
     let _ = w.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
     let _ = w.show();
     // Deliberately no set_focus(): the window is WS_EX_NOACTIVATE and must not steal the
-    // keyboard from whatever the user is typing in. Dismissal is driven by the global
-    // mouse hook (outside click / wheel) instead of a blur event, which never fires for a
-    // non-activating window.
-    crate::dlogf!(
-        "[app] reveal pos={:.0},{:.0} size={:.0}x{:.0} phys",
-        x,
-        y,
-        w_px,
-        h_px
-    );
+    // keyboard from whatever the user is typing in.
+    crate::dlogf!("[app] reveal pos={:.0},{:.0} size={:.0}x{:.0} phys", x, y, w_px, h_px);
 }
 
 /// Live cursor position in physical screen pixels (Win32 GetCursorPos).
@@ -952,10 +1006,9 @@ fn monitor_phys_at(app: &AppHandle, x: f64, y: f64) -> Option<(f64, f64, f64, f6
     Some((p.x as f64, p.y as f64, s.width as f64, s.height as f64))
 }
 
-
 /// Window rectangle in physical pixels (Win32 GetWindowRect), matching the low-level
 /// hook's coordinate space on DPI-scaled displays.
-fn window_rect_px(win: &tauri::WebviewWindow) -> Option<(i32, i32, i32, i32)> {
+fn window_rect_px(win: &WebviewWindow) -> Option<(i32, i32, i32, i32)> {
     #[repr(C)]
     struct Rect {
         left: i32,
@@ -983,14 +1036,8 @@ fn toolbar_report_size(app: AppHandle, size: Value) {
     let width = size.get("width").and_then(|v| v.as_f64()).unwrap_or(360.0).ceil().max(120.0);
     let height = TOOLBAR_HEIGHT;
     let dpr = size.get("dpr").and_then(|v| v.as_f64()).unwrap_or(1.0).clamp(0.5, 4.0);
-    // The webview may render at a different scale than the window reports; sizing must use
-    // the webview's ratio, in physical pixels, or the CSS viewport comes out too small.
-    // The webview's reported devicePixelRatio cannot be trusted for sizing (we measured
-    // window 900px physical with innerWidth 747 and dpr 1.8 — mutually inconsistent). So
-    // instead of converting units we CLOSE THE LOOP: ask for a size, observe the resulting
-    // CSS viewport, and correct by the measured ratio. It converges in one step.
-    // Physical = CSS * devicePixelRatio (see reveal_toolbar for the measurement that
-    // established this). No calibration loop is needed.
+    // Sizing must use the webview's ratio, in physical pixels, or the CSS viewport comes
+    // out too small. Physical = CSS * devicePixelRatio (see reveal_toolbar).
     *app.state::<State>().toolbar_dpr.lock().unwrap() = dpr;
     // Only a measurement taken with an actual selection may reveal the window; the empty
     // initial render also reports.
@@ -1009,17 +1056,16 @@ fn toolbar_report_size(app: AppHandle, size: Value) {
     // Otherwise only resize a toolbar that is already on screen (e.g. the action list
     // changed while visible). Resizing the hidden window here would shrink the very
     // window we are measuring in, compressing the layout and clipping the last action.
-    // Dead-band: ignore sub-2px differences. Without it, a 1px rounding difference between
-    // the window and the row re-triggers the ResizeObserver, which reports a 1px-larger
-    // width, which resizes again — a runaway +1px growth loop.
+    // Dead-band: ignore sub-2px differences, otherwise a 1px rounding difference between
+    // the window and the row re-triggers the ResizeObserver forever.
     let visible = app
         .get_webview_window("toolbar")
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false);
     if visible {
         let changed = {
-            let state = app.state::<State>();
-            let mut cur = state.toolbar_width.lock().unwrap();
+            let st = app.state::<State>();
+            let mut cur = st.toolbar_width.lock().unwrap();
             let changed = (*cur - width).abs() >= 2.0;
             if changed {
                 *cur = width;
@@ -1042,36 +1088,39 @@ fn toolbar_report_size(app: AppHandle, size: Value) {
 // Tray
 // ---------------------------------------------------------------------------
 
-fn rebuild_tray(app: &AppHandle, s: &store::Settings) {
-    let Some(tray) = app.tray_by_id("main") else { return };
-    let enable_item = CheckMenuItem::with_id(app, "enabled", "启用 Wisp", true, s.enabled, None::<&str>).ok();
-    let settings_item = MenuItem::with_id(app, "settings", "打开设置…", true, None::<&str>).ok();
-    let show_item = MenuItem::with_id(app, "show", "显示悬浮条", true, None::<&str>).ok();
-    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>).ok();
-    let sep1 = PredefinedMenuItem::separator(app).ok();
-    let sep2 = PredefinedMenuItem::separator(app).ok();
+/// Build the tray menu once and remember the check item.
+///
+/// Updating the menu later only flips that item's check state — rebuilding the whole menu on
+/// every settings change leaked native menu handles and dispatched work to the main thread
+/// while streams were running.
+fn build_tray_menu(app: &AppHandle, s: &store::Settings) -> Option<Menu<tauri::Wry>> {
+    let enable_item = CheckMenuItem::with_id(app, "enabled", "启用 Wisp", true, s.enabled, None::<&str>).ok()?;
+    let settings_item = MenuItem::with_id(app, "settings", "打开设置…", true, None::<&str>).ok()?;
+    let show_item = MenuItem::with_id(app, "show", "显示悬浮条", true, None::<&str>).ok()?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>).ok()?;
+    let sep1 = PredefinedMenuItem::separator(app).ok()?;
+    let sep2 = PredefinedMenuItem::separator(app).ok()?;
+    let menu = Menu::with_items(
+        app,
+        &[&enable_item, &sep1, &settings_item, &show_item, &sep2, &quit_item],
+    )
+    .ok()?;
+    *app.state::<State>().tray_enabled_item.lock().unwrap() = Some(enable_item);
+    Some(menu)
+}
 
-    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
-    if let Some(i) = enable_item.as_ref() {
-        items.push(i);
-    }
-    if let Some(i) = sep1.as_ref() {
-        items.push(i);
-    }
-    if let Some(i) = settings_item.as_ref() {
-        items.push(i);
-    }
-    if let Some(i) = show_item.as_ref() {
-        items.push(i);
-    }
-    if let Some(i) = sep2.as_ref() {
-        items.push(i);
-    }
-    if let Some(i) = quit_item.as_ref() {
-        items.push(i);
-    }
-    if let Ok(menu) = Menu::with_items(app, &items) {
-        let _ = tray.set_menu(Some(menu));
+fn update_tray(app: &AppHandle, s: &store::Settings) {
+    let Some(tray) = app.tray_by_id("main") else { return };
+    let existing = app.state::<State>().tray_enabled_item.lock().unwrap().clone();
+    match existing {
+        Some(item) => {
+            let _ = item.set_checked(s.enabled);
+        }
+        None => {
+            if let Some(menu) = build_tray_menu(app, s) {
+                let _ = tray.set_menu(Some(menu));
+            }
+        }
     }
     let _ = tray.set_tooltip(Some(if s.enabled { "Wisp" } else { "Wisp（已停用）" }));
 }
@@ -1085,8 +1134,10 @@ fn on_tray_menu(app: &AppHandle, id: &str) {
         }
         "settings" => show_settings(app),
         "show" => {
-            if let Some(sel) = selection::get_current_selection() {
-                on_selection_event(app, sel);
+            // Asynchronous on purpose: the synchronous variant ran UIAutomation on the main
+            // thread and froze the whole app whenever the foreground application was busy.
+            if !selection::request_selection(true) {
+                crate::dlogf!("[app] tray 'show': no selection request queued");
             }
         }
         "quit" => {
@@ -1103,10 +1154,101 @@ fn on_selection_event(app: &AppHandle, payload: selection::SelectionPayload) {
 }
 
 // ---------------------------------------------------------------------------
+// Ctrl-hold trigger
+// ---------------------------------------------------------------------------
+
+/// Hold-Ctrl trigger state.
+///
+/// In `ctrlkey` mode the hook does not detect mouse gestures at all; instead the toolbar is
+/// shown when Ctrl is held down for a moment while text is selected. The previous build only
+/// set the hook's passive flag and never listened for the key, so this trigger mode silently
+/// did nothing.
+struct CtrlTrigger {
+    /// When the current Ctrl press started, or None when Ctrl is not down.
+    since: Option<Instant>,
+    /// Set once this press has already fired, so holding it does not repeat.
+    fired: bool,
+}
+
+static CTRL_TRIGGER: Mutex<CtrlTrigger> = Mutex::new(CtrlTrigger { since: None, fired: false });
+
+/// How long Ctrl has to be held before the toolbar appears.
+const CTRL_HOLD_MS: u128 = 350;
+
+fn on_global_key(_app: &AppHandle, v: &Value) {
+    if store::load().trigger_mode != "ctrlkey" {
+        return;
+    }
+    let key = v.get("uniKey").and_then(|k| k.as_str()).unwrap_or("");
+    let action = v.get("action").and_then(|a| a.as_i64()).unwrap_or(0);
+    // Ignore synthetic key events: the clipboard fallback injects Ctrl+C/Ctrl+V, which would
+    // otherwise re-trigger the toolbar in a loop. LLKHF_INJECTED == 0x10.
+    let injected = v.get("flags").and_then(|f| f.as_i64()).unwrap_or(0) & 0x10 != 0;
+    if injected {
+        return;
+    }
+
+    let mut t = CTRL_TRIGGER.lock().unwrap();
+    if key != "Control" {
+        // Any other key cancels a pending hold: the user is typing or using Ctrl+C.
+        if action == 0 {
+            t.since = None;
+            t.fired = false;
+        }
+        return;
+    }
+    if action == 0 {
+        // Key-down only starts the clock; the watcher below fires once the hold is long
+        // enough. Firing here would open the bar for every ordinary Ctrl press.
+        if t.since.is_none() {
+            t.since = Some(Instant::now());
+            t.fired = false;
+        }
+    } else {
+        // Key-up ends the hold. The watcher is the only place that fires, otherwise a long
+        // hold followed by release would request the selection twice.
+        t.since = None;
+        t.fired = false;
+    }
+}
+
+/// Watch for Ctrl being held down while a selection exists.
+///
+/// The trigger is a *hold*, so it cannot be decided in the key-down handler. This runs on the
+/// app's async runtime, samples the hold state, and requests the selection exactly once per
+/// press.
+fn spawn_ctrl_hold_watcher() {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            // Only touch the settings store when a hold is actually in progress.
+            let due = {
+                let mut t = CTRL_TRIGGER.lock().unwrap();
+                match t.since {
+                    Some(start) if !t.fired => {
+                        if start.elapsed() >= Duration::from_millis(CTRL_HOLD_MS as u64) {
+                            t.fired = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
+            };
+            if due && store::load().trigger_mode == "ctrlkey" {
+                if !selection::request_selection(true) {
+                    crate::dlogf!("[app] ctrl trigger: request dropped");
+                }
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Entry
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Mark the process per-monitor DPI aware.
 ///
 /// Must run before any window is created: otherwise Windows virtualises coordinates,
@@ -1124,13 +1266,18 @@ fn enable_dpi_awareness() {
     }
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     enable_dpi_awareness();
     tauri::Builder::default()
         // Must be the first plugin: a second launch hands off to this instance instead of
         // starting another process (which previously produced duplicate tray icons).
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_settings(app);
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // Relaunching with --settings (or a plain relaunch) should surface the settings
+            // window; the argv is available so a future deep link can be routed.
+            if argv.iter().any(|a| a == "--settings") || argv.len() <= 1 {
+                show_settings(app);
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .manage(State::default())
@@ -1146,7 +1293,6 @@ pub fn run() {
             toolbar_hide,
             toolbar_get_state,
             toolbar_copy,
-            toolbar_search,
             toolbar_report_size,
             run_action,
             action_get_context,
@@ -1161,8 +1307,7 @@ pub fn run() {
             selection::set_app(handle.clone());
 
             build_toolbar(&handle);
-            build_action(&handle);
-            rebuild_tray(&handle, &store::load());
+            update_tray(&handle, &store::load());
 
             let h = handle.clone();
             handle.listen("selection", move |event| {
@@ -1171,9 +1316,17 @@ pub fn run() {
                 }
             });
 
-            // Hide the toolbar on scroll only. Outside-clicks are handled by the toolbar
-            // window losing focus (see on_window_event), which avoids any coordinate-space
-            // mismatch between the low-level hook and the window system.
+            // Ctrl-hold trigger.
+            let hk = handle.clone();
+            handle.listen("global-key", move |event| {
+                if let Ok(v) = serde_json::from_str::<Value>(event.payload()) {
+                    on_global_key(&hk, &v);
+                }
+            });
+            spawn_ctrl_hold_watcher();
+
+            // Hide the toolbar on scroll and on clicks outside it. Both sides are compared in
+            // the hook's physical-pixel space by asking Win32 for the window rect.
             let h2 = handle.clone();
             handle.listen("global-pointer", move |event| {
                 let v: Value = serde_json::from_str(event.payload()).unwrap_or(json!({}));
@@ -1187,8 +1340,7 @@ pub fn run() {
                 }
                 // Wheel dismisses immediately. A button-down only dismisses when it lands
                 // outside the bar — otherwise pressing an action would hide it before the
-                // click registered. Both sides are compared in the hook's physical-pixel
-                // space by asking Win32 for the window rect.
+                // click registered.
                 if action == 3 {
                     let _ = tb.hide();
                     return;
@@ -1196,7 +1348,7 @@ pub fn run() {
                 if action == 0 {
                     if let Some((l, t, r, b)) = window_rect_px(&tb) {
                         let inside = px >= l && px <= r && py >= t && py <= b;
-                        if !inside {
+                        if !inside && !PREVIEW.load(Ordering::SeqCst) {
                             let _ = tb.hide();
                         }
                     }
@@ -1225,17 +1377,20 @@ pub fn run() {
                 }
             }
 
-            // `--settings` opens settings on launch (also handy for scripting). On a
-            // first run, when no model provider has been configured yet, open it
-            // automatically so the app is usable without hunting through the tray.
-            let no_provider = s.providers.iter().all(|p| p.api_base.trim().is_empty() || p.model.trim().is_empty());
+            // `--settings` opens settings on launch (also handy for scripting). On a first
+            // run, when no model provider has been configured yet, open it automatically so
+            // the app is usable without hunting through the tray.
+            let no_provider = s
+                .providers
+                .iter()
+                .all(|p| p.api_base.trim().is_empty() || p.model.trim().is_empty());
             crate::dlogf!("[app] setup done; providers={} no_provider={no_provider}", s.providers.len());
             if std::env::args().any(|a| a == "--settings") || no_provider {
                 show_settings(&handle);
             }
 
             // `--selftest-chat <url>` runs a two-turn conversation against an endpoint and
-            // prints the result. It exercises the real request path (message list, streaming
+            // logs the result. It exercises the real request path (message list, streaming
             // parse, follow-up context) inside the app binary, which links the native engine
             // correctly — integration tests cannot, they fail at load time.
             let args: Vec<String> = std::env::args().collect();
@@ -1272,16 +1427,13 @@ pub fn run() {
                 });
             }
 
-            // `--preview` shows the toolbar with sample text at the cursor, without needing
-            // a real selection. Useful for inspecting the UI (and for automated visual
-            // checks) without taking over the user's mouse.
+            // `--preview` shows the toolbar with sample text, without needing a real
+            // selection. Useful for inspecting the UI without taking over the user's mouse.
             if std::env::args().any(|a| a == "--preview") {
                 PREVIEW.store(true, Ordering::SeqCst);
                 let h = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                    // Anchor in the middle of the primary monitor: the cursor could be
-                    // anywhere, including a screen edge where the bar would be clamped.
+                    tokio::time::sleep(Duration::from_millis(800)).await;
                     let (cx, cy) = h
                         .primary_monitor()
                         .ok()
@@ -1294,7 +1446,6 @@ pub fn run() {
                             )
                         })
                         .unwrap_or((300.0, 300.0));
-                    // Hand the anchor through in physical units, matching the real path.
                     let sc = h
                         .primary_monitor()
                         .ok()
@@ -1316,6 +1467,40 @@ pub fn run() {
                     );
                 });
             }
+
+            // `--selftest-panels` opens two result panels from fake selections and logs the
+            // resulting window labels. Multi-window support is otherwise only observable by
+            // clicking the toolbar twice, which cannot be automated reliably.
+            if std::env::args().any(|a| a == "--selftest-panels") {
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(700)).await;
+                    for (i, text) in ["first selection", "second selection"].iter().enumerate() {
+                        let pending = PendingAction {
+                            action: json!({ "id": "translate", "name": format!("selftest {}", i + 1), "color": "#3b6fe0" }),
+                            text: (*text).into(),
+                            program_name: "selftest".into(),
+                            system_prompt: "reply ok".into(),
+                            provider: None,
+                            model_name: String::new(),
+                            thinking_level: "off".into(),
+                            thinking_supported: false,
+                            window_label: String::new(),
+                        };
+                        match new_panel(&h, pending) {
+                            Ok(label) => crate::dlogf!("SELFTEST panel opened: {label}"),
+                            Err(e) => crate::dlogf!("SELFTEST panel FAILED: {e}"),
+                        }
+                    }
+                    let labels: Vec<String> = h
+                        .webview_windows()
+                        .keys()
+                        .filter(|l| l.starts_with("action-"))
+                        .cloned()
+                        .collect();
+                    crate::dlogf!("SELFTEST panels now: {} {:?}", labels.len(), labels);
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -1326,18 +1511,36 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
-            // The floating toolbar dismisses itself when it loses focus (an outside
-            // click), matching Cherry Studio's hide-on-blur toolbar behaviour.
-            // The toolbar is non-activating, so it receives no blur; dismissal is handled
-            // by the global mouse hook. Nothing to do here.
+            // A closed result panel releases its conversation, otherwise every rerun would
+            // keep its history (and provider snapshot) alive for the whole session.
+            tauri::WindowEvent::Destroyed => {
+                let label = window.label().to_string();
+                if label.starts_with("action") {
+                    if let Some(app) = window.app_handle().try_state::<State>() {
+                        let mut panels = app.panels.lock().unwrap();
+                        panels.meta.remove(&label);
+                        panels.conv.remove(&label);
+                    }
+                }
+            }
+            // Remember the panel's size so the next result opens at the size the user chose.
+            tauri::WindowEvent::Resized(size) => {
+                if window.label().starts_with("action") {
+                    // `size` is physical; convert to logical for the builder.
+                    let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
+                    if let Some(app) = window.app_handle().try_state::<State>() {
+                        let mut slot = app.panel_size.lock().unwrap();
+                        *slot = Some((size.width as f64 / scale, size.height as f64 / scale));
+                    }
+                }
+            }
             _ => {}
         })
         .build(tauri::generate_context!())
         .expect("error building tauri app")
-        .run(|app, event| {
+        .run(|_app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 selection::cleanup();
             }
-            let _ = app;
         });
 }

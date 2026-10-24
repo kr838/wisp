@@ -127,10 +127,31 @@ void sh_set_clipboard_filter(void* h, int32_t mode, const char* const* list, int
 void sh_set_fine_tuned(void* h, int32_t listType, const char* const* list, int32_t count);
 void sh_enable_mouse_move(void* h, int32_t enable);
 
-/* --- synchronous selection (for hotkey / "get current selection") --- */
+/* --- selection retrieval --- */
 /**
- * Retrieve the current selection synchronously. Returns 1 when text was found.
- * On success, `out` fields point into shim-owned storage valid until the next call.
+ * Ask the worker thread to read the current selection of the foreground window and
+ * deliver it through the normal selection callback.
+ *
+ * This is the non-blocking counterpart of `sh_get_current_selection`: it never touches
+ * COM on the calling thread, so a host may call it from a UI thread or a hotkey handler
+ * without risking a hang on a busy target application.
+ *
+ * @param triggeredByUser 1 when the user explicitly asked for it (skips the mouse-gesture
+ *                        cursor heuristics that only make sense for automatic detection).
+ * @return 1 when the request was queued, 0 when it was dropped (not running, no
+ *         foreground window, or the worker is already busy).
+ */
+int32_t sh_request_selection(void* h, int32_t triggeredByUser);
+
+/**
+ * Retrieve the current selection synchronously, on the calling thread.
+ *
+ * @warning Uses the UIAutomation instance created on the thread that called
+ *          `sh_start`, so it must be called from that same thread. Prefer
+ *          `sh_request_selection`; a slow target application can block the caller.
+ *
+ * Returns 1 when text was found. On success, `out` fields point into shim-owned
+ * storage valid until the next call.
  */
 int32_t sh_get_current_selection(void* h, SSelectionOut* out);
 

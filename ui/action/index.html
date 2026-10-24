@@ -7,18 +7,18 @@
   </head>
   <body>
     <div class="card">
+      <!-- Minimal chrome: action name + two icon buttons. Model name and other metadata were
+           removed from the header — they cost a line of vertical space and are not needed
+           while reading the answer. -->
       <header class="head" data-tauri-drag-region>
-        <div class="title">
-          <span id="name">处理</span>
-          <span class="model" id="model"></span>
-          <span class="think-badge" id="think-badge"></span>
-        </div>
-        <div class="win-btns">
-          <button class="wb" id="btn-close" title="关闭">&#10005;</button>
-        </div>
+        <span class="name" id="name">处理</span>
+        <span class="win-btns">
+          <button class="wb" id="btn-copy" title="复制结果">⧉</button>
+          <button class="wb" id="btn-close" title="关闭">✕</button>
+        </span>
       </header>
 
-      <!-- Both panels start collapsed: the answer is the content people came for. -->
+      <!-- Both folds are single thin bars and start collapsed. -->
       <details class="fold" id="think-wrap" hidden>
         <summary>
           <span class="fold-label">思考过程</span>
@@ -35,22 +35,18 @@
         <div class="fold-body" id="src"></div>
       </details>
 
-      <!-- Conversation: the first turn is the action's answer, later turns are follow-ups. -->
+      <!-- The answer thread is the whole point: it gets all remaining height. -->
       <section class="thread" id="thread">
         <div class="empty" id="empty">正在处理…</div>
       </section>
 
+      <!-- One row only: the input plus a single button that is 发送 or 停止 depending on
+           state. 重试 appears only after a failure, where it is actually useful. -->
       <footer class="foot">
-        <div class="ask">
-          <textarea id="ask-input" rows="1" placeholder="追问…（Enter 发送，Shift+Enter 换行）"></textarea>
-          <button class="btn accent" id="btn-ask" title="发送">发送</button>
-        </div>
-        <div class="foot-row">
-          <button class="btn" id="btn-stop">停止</button>
-          <button class="btn" id="btn-retry">重试</button>
-          <span class="foot-gap"></span>
-          <button class="btn" id="btn-copy">复制结果</button>
-        </div>
+        <textarea id="ask-input" rows="1" placeholder="追问…"></textarea>
+        <button class="btn" id="btn-retry" hidden>重试</button>
+        <button class="btn accent" id="btn-stop" hidden>停止</button>
+        <button class="btn accent" id="btn-ask">发送</button>
       </footer>
     </div>
     <script src="marked.umd.js"></script>

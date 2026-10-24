@@ -4,8 +4,8 @@
  *
  * The pill is `width: max-content`, so its bounding box is always the true intrinsic
  * width regardless of how wide the window currently is. That removes the feedback loop
- * the previous fixed-width approach suffered from (a narrow window compressed the row,
- * the compressed width was reported, and the last action stayed clipped).
+ * a fixed-width approach suffers from (a narrow window compresses the row, the compressed
+ * width is reported, and the last action stays clipped).
  */
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
@@ -15,29 +15,27 @@ let state = { actions: [], theme: 'light', hasProvider: false, compact: false }
 let payload = null
 let busy = false
 let sizeObserver = null
+/** Message shown instead of the action row (e.g. a missing provider). */
+let notice = null
 
 /**
  * Exact window size (CSS px) for the pill.
  *
  * The pill is width:100% of the window, so it cannot be measured directly. Instead sum the
- * row's real contents and add the pill's own horizontal padding. The result is the window
- * size verbatim — no extra slack, because any slack would show as a strip of bare backdrop
- * on one side (the pill is centred).
+ * row's real contents and add the pill's own horizontal padding. No slack is added, because
+ * any slack would show as a strip of bare backdrop beside the pill.
  *
- * scrollWidth is used as a floor for the sum so that a momentarily-too-narrow window cannot
- * make us under-report (which is what used to clip the last action).
+ * scrollWidth must NOT be used: the pill fills the window, so scrollWidth tracks the window
+ * and every resize would report a 1px-larger value forever (a runaway +1px loop).
  */
 function measure(pill) {
   const s = getComputedStyle(pill)
   const px = (v) => Number.parseFloat(v) || 0
   const pad = px(s.paddingLeft) + px(s.paddingRight)
-  // Intrinsic content only. scrollWidth must NOT be used as a floor: the pill is
-  // width:100% of the window, so scrollWidth tracks the window and each resize would
-  // report a 1px-larger value forever (the runaway +1px loop we observed).
   return { width: Math.ceil(contentSum(pill) + pad), height: 36 }
 }
 
-/// Sum of the row's intrinsic children (chips + dividers + gaps).
+/// Sum of the row's intrinsic children (chips + gaps).
 function contentSum(pill) {
   const s = getComputedStyle(pill)
   const gap = px2(s.columnGap)
@@ -50,20 +48,14 @@ const px2 = (v) => Number.parseFloat(v) || 0
 
 function reportSize(pill) {
   const { width, height } = measure(pill)
-  const kids = [...pill.children].map(
-    (c) => `${c.textContent || c.className}:${Math.round(c.getBoundingClientRect().width)}`
-  )
   invoke('toolbar_report_size', {
     size: {
       width,
       height,
       // The webview's own scale. It can differ from the window's scale_factor, and the
-      // window must be sized in physical pixels using THIS value or the CSS viewport ends
-      // up smaller than requested (which compresses the row and clips the last chip).
+      // window must be sized in physical pixels using THIS value.
       dpr: window.devicePixelRatio || 1,
-      innerH: window.innerHeight,
-      hasPayload: !!(payload && payload.text),
-      diag: { width, inner: window.innerWidth, pill: Math.round(pill.getBoundingClientRect().width), kids, dpr: window.devicePixelRatio }
+      hasPayload: !!(payload && payload.text)
     }
   })
 }
@@ -75,15 +67,14 @@ function render() {
   const pill = document.createElement('div')
   pill.className = 'pill' + (busy ? ' busy' : '')
 
-  // The toolbar shows exactly the actions the user enabled — nothing is hardcoded.
-  // Search is a normal action (default off) and Settings lives in the tray only.
-  // Everything here is a single, uniform row: one padding, one font size, no trailing
-  // utility group, so the bar reads as one consistent strip.
   const list = state.actions || []
-  if (!payload || !payload.text) {
+  if (notice) {
+    pill.appendChild(hintEl(notice.text))
+    if (notice.action) pill.appendChild(actionBtn(notice.action.label, null, true, notice.action.run))
+  } else if (!payload || !payload.text) {
     pill.appendChild(hintEl('未选中文本'))
   } else if (list.length === 0) {
-    pill.appendChild(hintEl('无可用动作，请在设置中启用'))
+    pill.appendChild(hintEl('无可用动作'))
   } else {
     list.forEach((a) => {
       pill.appendChild(actionBtn(a.name || '处理', a.color, false, () => onClick(a)))
@@ -95,14 +86,13 @@ function render() {
   requestAnimationFrame(() => {
     reportSize(pill)
     if (sizeObserver) sizeObserver.disconnect()
-    // Re-report if the layout settles later (font metrics, emoji, etc.).
+    // Re-report if the layout settles later (font metrics).
     sizeObserver = new ResizeObserver(() => reportSize(pill))
     sizeObserver.observe(pill)
   })
 }
 
-/// A text action. `color` (hex) gives the chip its own accent; `muted` renders it in the
-/// neutral colour (used for the trailing search/settings actions).
+/// A text action. `color` (hex) gives the chip its own accent; `muted` renders it neutral.
 function actionBtn(label, color, muted, onClick) {
   const b = document.createElement('button')
   b.type = 'button'
@@ -124,12 +114,28 @@ function hintEl(text) {
 async function onClick(a) {
   if (busy) return
   busy = true
+  notice = null
   render()
   try {
-    await invoke('run_action', { actionId: a.id })
+    const res = await invoke('run_action', { actionId: a.id })
+    if (res && res.ok === false) {
+      showError(res.error || '动作执行失败')
+    }
+  } catch (err) {
+    showError(String((err && err.message) || err))
   } finally {
     busy = false
     render()
+  }
+}
+
+/// A failed action must not look like a no-op. The bar stays visible with the reason and,
+/// when the fix is configuration, a shortcut to the settings window.
+function showError(message) {
+  const needsSetup = /模型|提供商|未配置/.test(message)
+  notice = {
+    text: message,
+    action: needsSetup ? { label: '打开设置', run: () => invoke('open_settings') } : null
   }
 }
 
@@ -140,6 +146,7 @@ window.addEventListener('keydown', (e) => {
 listen('toolbar-payload', (ev) => {
   payload = ev.payload
   busy = false
+  notice = null
   render()
 })
 listen('settings-changed', () => {
@@ -149,7 +156,8 @@ listen('settings-changed', () => {
   })
 })
 
-/// Appearance (theme + material tint) is native-side; here we only apply the tint opacity.
+/// Appearance (theme + tint) is applied natively; here only the tint opacity and theme are
+/// set on the DOM.
 function applyAppearance(p) {
   const el = document.documentElement
   el.setAttribute('data-theme', p.theme === 'dark' ? 'dark' : 'light')

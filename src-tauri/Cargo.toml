@@ -1,6 +1,6 @@
 [package]
 name = "selection-assistant"
-version = "1.0.0"
+version = "1.1.0"
 description = "Wisp - 轻量 AI 划词助手 (Tauri edition)"
 authors = ["Selection Assistant"]
 edition = "2021"
@@ -31,6 +31,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-
-[build]
-# Point cargo at the C++ import library produced by native/build.bat

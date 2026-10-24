@@ -21,16 +21,14 @@
 //!   `String`s before anything else happens.
 //! * `HOOK` is an `AtomicPtr` because it is read by callbacks and written by the main thread.
 //!
-//! # Lifetime
-//!
-//! `ensure_created` allocates the shim lazily; `cleanup` releases it and is safe to call more
-//! than once (it swaps the pointer). The hook is only *started* on demand, so a disabled
-//! feature costs nothing.
+//! Retrieval is always requested asynchronously (`request_selection`): the worker queues it
+//! and reports back through the selection callback. Calling UIAutomation from the UI thread
+//! is what froze the app when the target application was busy.
 
 use std::ffi::{c_char, c_void, CStr};
 use std::os::raw::c_int;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -81,20 +79,127 @@ type SelectionCb = extern "C" fn(*const SSelection, *mut c_void);
 type MouseCb = extern "C" fn(*const SMouseEvent, *mut c_void);
 type KeyCb = extern "C" fn(*const SKeyEvent, *mut c_void);
 
-extern "C" {
-    fn sh_create() -> *mut c_void;
-    fn sh_destroy(h: *mut c_void);
-    fn sh_start(h: *mut c_void, on_sel: SelectionCb, on_mouse: MouseCb, on_key: KeyCb, user: *mut c_void) -> c_int;
-    fn sh_stop(h: *mut c_void);
-    fn sh_is_running(h: *mut c_void) -> c_int;
-    fn sh_set_passive_mode(h: *mut c_void, passive: c_int);
-    fn sh_set_clipboard_enabled(h: *mut c_void, enabled: c_int);
-    fn sh_enable_mouse_move(h: *mut c_void, enable: c_int);
-    fn sh_set_global_filter(h: *mut c_void, mode: c_int, list: *const *const c_char, count: c_int);
-    fn sh_set_fine_tuned(h: *mut c_void, list_type: c_int, list: *const *const c_char, count: c_int);
-    fn sh_get_current_selection(h: *mut c_void, out: *mut SSelection) -> c_int;
-    fn sh_write_clipboard(h: *mut c_void, utf8: *const c_char) -> c_int;
-    fn sh_last_error(h: *mut c_void) -> *const c_char;
+/// Resolved entry points of `SelectionHook.dll`.
+///
+/// The DLL is loaded at runtime instead of being imported at link time. Two reasons:
+///
+/// * `cargo test --lib` links the library into a test binary whose working directory is the
+///   build's `deps/` folder. With a link-time import, the DLL has to be present there too or
+///   Windows aborts the process at load with `STATUS_ENTRYPOINT_NOT_FOUND` before a single
+///   test runs — which looks exactly like a code failure.
+/// * The import library carries a static libgcc unwinder, so the linker had to be told to
+///   tolerate duplicate `_Unwind_Resume` symbols.
+///
+/// Loading with `LoadLibraryW` keeps the dependency entirely out of the executable's import
+/// table, and lets a missing DLL be reported as a readable error instead of a process abort.
+struct Api {
+    create: unsafe extern "C" fn() -> *mut c_void,
+    destroy: unsafe extern "C" fn(*mut c_void),
+    start: unsafe extern "C" fn(*mut c_void, SelectionCb, MouseCb, KeyCb, *mut c_void) -> c_int,
+    stop: unsafe extern "C" fn(*mut c_void),
+    is_running: unsafe extern "C" fn(*mut c_void) -> c_int,
+    set_passive_mode: unsafe extern "C" fn(*mut c_void, c_int),
+    set_clipboard_enabled: unsafe extern "C" fn(*mut c_void, c_int),
+    set_global_filter: unsafe extern "C" fn(*mut c_void, c_int, *const *const c_char, c_int),
+    set_fine_tuned: unsafe extern "C" fn(*mut c_void, c_int, *const *const c_char, c_int),
+    request_selection: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
+    write_clipboard: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
+    last_error: unsafe extern "C" fn(*mut c_void) -> *const c_char,
+}
+
+// The function pointers are immutable after `OnceLock` initialisation and the DLL stays
+// loaded for the whole process lifetime.
+unsafe impl Send for Api {}
+unsafe impl Sync for Api {}
+
+static API: OnceLock<Result<Api, String>> = OnceLock::new();
+
+fn dll_candidates() -> Vec<std::path::PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            v.push(dir.join("SelectionHook.dll"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        v.push(cwd.join("SelectionHook.dll"));
+        // Common dev layouts: running from src-tauri/ or the repo root.
+        v.push(cwd.join("native").join("SelectionHook.dll"));
+        v.push(cwd.join("..").join("native").join("SelectionHook.dll"));
+    }
+    v
+}
+
+#[cfg(windows)]
+fn load_api() -> Result<Api, String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LoadLibraryW(name: *const u16) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+
+    let mut last_err = String::from("找不到 SelectionHook.dll");
+    for path in dll_candidates() {
+        if !path.exists() {
+            continue;
+        }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+        if module.is_null() {
+            last_err = format!("无法加载 {}", path.display());
+            continue;
+        }
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {{
+                let p = unsafe { GetProcAddress(module, concat!($name, "\0").as_ptr() as *const c_char) };
+                if p.is_null() {
+                    return Err(format!("{} 缺少导出 {}", path.display(), $name));
+                }
+                unsafe { std::mem::transmute::<*mut c_void, $ty>(p) }
+            }};
+        }
+        return Ok(Api {
+            create: sym!("sh_create", unsafe extern "C" fn() -> *mut c_void),
+            destroy: sym!("sh_destroy", unsafe extern "C" fn(*mut c_void)),
+            start: sym!(
+                "sh_start",
+                unsafe extern "C" fn(*mut c_void, SelectionCb, MouseCb, KeyCb, *mut c_void) -> c_int
+            ),
+            stop: sym!("sh_stop", unsafe extern "C" fn(*mut c_void)),
+            is_running: sym!("sh_is_running", unsafe extern "C" fn(*mut c_void) -> c_int),
+            set_passive_mode: sym!("sh_set_passive_mode", unsafe extern "C" fn(*mut c_void, c_int)),
+            set_clipboard_enabled: sym!("sh_set_clipboard_enabled", unsafe extern "C" fn(*mut c_void, c_int)),
+            set_global_filter: sym!(
+                "sh_set_global_filter",
+                unsafe extern "C" fn(*mut c_void, c_int, *const *const c_char, c_int)
+            ),
+            set_fine_tuned: sym!(
+                "sh_set_fine_tuned",
+                unsafe extern "C" fn(*mut c_void, c_int, *const *const c_char, c_int)
+            ),
+            request_selection: sym!("sh_request_selection", unsafe extern "C" fn(*mut c_void, c_int) -> c_int),
+            write_clipboard: sym!(
+                "sh_write_clipboard",
+                unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int
+            ),
+            last_error: sym!("sh_last_error", unsafe extern "C" fn(*mut c_void) -> *const c_char),
+        });
+    }
+    Err(last_err)
+}
+
+#[cfg(not(windows))]
+fn load_api() -> Result<Api, String> {
+    Err("selection engine is only available on Windows".into())
+}
+
+fn api() -> Result<&'static Api, String> {
+    match API.get_or_init(load_api) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(e.clone()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -114,9 +219,6 @@ pub struct SelectionPayload {
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static HOOK: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
-static STARTED: AtomicBool = AtomicBool::new(false);
-/// Pause automatic reruns while the toolbar/action windows are driving their own flow.
-static SUPPRESS: AtomicBool = AtomicBool::new(false);
 
 fn unescape_ptr(p: *const c_char) -> String {
     if p.is_null() {
@@ -156,13 +258,12 @@ extern "C" fn on_mouse(ev: *const SMouseEvent, _user: *mut c_void) {
         return;
     }
     let e = unsafe { &*ev };
-    // action: 0=down 1=up 2=move 3=wheel
+    // Only the two events the app reacts to are forwarded (0=down, 3=wheel).
     if e.action == 0 || e.action == 3 {
         if let Some(app) = APP.get() {
             let _ = app.emit("global-pointer", serde_json::json!({ "action": e.action, "x": e.x, "y": e.y }));
         }
     }
-    let _ = SUPPRESS;
 }
 
 extern "C" fn on_key(ev: *const SKeyEvent, _user: *mut c_void) {
@@ -170,10 +271,17 @@ extern "C" fn on_key(ev: *const SKeyEvent, _user: *mut c_void) {
         return;
     }
     let e = unsafe { &*ev };
-    if e.action == 0 {
-        if let Some(app) = APP.get() {
-            let _ = app.emit("global-key", serde_json::json!({ "uniKey": unescape_ptr(e.uni_key) }));
-        }
+    // Both edges are forwarded: the hold-Ctrl trigger needs key-up to reset its state.
+    if let Some(app) = APP.get() {
+        let _ = app.emit(
+            "global-key",
+            serde_json::json!({
+                "uniKey": unescape_ptr(e.uni_key),
+                "action": e.action,
+                "vkCode": e.vk_code,
+                "flags": e.flags,
+            }),
+        );
     }
 }
 
@@ -195,6 +303,7 @@ pub fn apply_config(cfg: &HookConfig) {
     if h.is_null() {
         return;
     }
+    let Ok(api) = api() else { return };
     let ctrls: Vec<std::ffi::CString> = cfg
         .filter_list
         .clone()
@@ -209,25 +318,36 @@ pub fn apply_config(cfg: &HookConfig) {
         Some("blacklist") => 2,
         _ => 0,
     };
+    // In "hold Ctrl" mode gesture detection is off: the toolbar is shown by the key
+    // watcher in `lib.rs` instead.
+    let passive = cfg.trigger_mode.as_deref() == Some("ctrlkey");
     unsafe {
-        sh_set_passive_mode(h, if cfg.trigger_mode.as_deref() == Some("ctrlkey") { 1 } else { 0 });
-        sh_set_clipboard_enabled(h, if cfg.clipboard_fallback.unwrap_or(true) { 1 } else { 0 });
-        sh_set_global_filter(h, mode, ptrs.as_ptr(), ptrs.len() as c_int);
+        (api.set_passive_mode)(h, if passive { 1 } else { 0 });
+        (api.set_clipboard_enabled)(h, if cfg.clipboard_fallback.unwrap_or(true) { 1 } else { 0 });
     }
-    // Predefined blacklist for the "selected" trigger mode (mirrors Cherry Studio).
-    if cfg.filter_mode.as_deref().unwrap_or("default") == "default" {
+
+    // Predefined blacklist for the "selected" trigger mode (mirrors Cherry Studio). In Ctrl
+    // mode there are no automatic gestures, so no filter is applied — the user's explicit
+    // request must always be honoured.
+    let default_mode = cfg.filter_mode.as_deref().unwrap_or("default") == "default";
+    if default_mode && !passive {
         let predef = PREDEFINED_BLACKLIST
             .iter()
             .filter_map(|s| std::ffi::CString::new(*s).ok())
             .collect::<Vec<_>>();
         let pp: Vec<*const c_char> = predef.iter().map(|c| c.as_ptr()).collect();
-        unsafe { sh_set_global_filter(h, 2, pp.as_ptr(), pp.len() as c_int) };
+        unsafe { (api.set_global_filter)(h, 2, pp.as_ptr(), pp.len() as c_int) };
+    } else if default_mode {
+        unsafe { (api.set_global_filter)(h, 0, std::ptr::null(), 0) };
+    } else {
+        unsafe { (api.set_global_filter)(h, mode, ptrs.as_ptr(), ptrs.len() as c_int) };
     }
+
     unsafe {
         let ftl = ["acrobat.exe", "wps.exe", "cajviewer.exe"];
         let ftl_c: Vec<std::ffi::CString> = ftl.iter().filter_map(|s| std::ffi::CString::new(*s).ok()).collect();
         let ftl_p: Vec<*const c_char> = ftl_c.iter().map(|c| c.as_ptr()).collect();
-        sh_set_fine_tuned(h, 0, ftl_p.as_ptr(), ftl_p.len() as c_int);
+        (api.set_fine_tuned)(h, 0, ftl_p.as_ptr(), ftl_p.len() as c_int);
     }
 }
 
@@ -255,7 +375,8 @@ pub fn ensure_created() -> bool {
     if !HOOK.load(Ordering::SeqCst).is_null() {
         return true;
     }
-    let h = unsafe { sh_create() };
+    let Ok(api) = api() else { return false };
+    let h = unsafe { (api.create)() };
     if h.is_null() {
         return false;
     }
@@ -268,60 +389,53 @@ pub fn set_app(app: AppHandle) {
 }
 
 pub fn start(cfg: &HookConfig) -> Result<(), String> {
+    let api = api()?;
     if !ensure_created() {
-        return Err("sh_create failed".into());
+        return Err("选词引擎初始化失败（SelectionHook.dll 不可用）".into());
     }
     let h = HOOK.load(Ordering::SeqCst);
-    if unsafe { sh_is_running(h) } != 0 {
+    if unsafe { (api.is_running)(h) } != 0 {
         apply_config(cfg);
         return Ok(());
     }
-    let ok = unsafe { sh_start(h, on_selection, on_mouse, on_key, std::ptr::null_mut()) };
+    let ok = unsafe { (api.start)(h, on_selection, on_mouse, on_key, std::ptr::null_mut()) };
     if ok == 0 {
-        let e = unsafe { CStr::from_ptr(sh_last_error(h)) }.to_string_lossy().into_owned();
-        return Err(format!("sh_start failed: {e}"));
+        let e = unsafe { CStr::from_ptr((api.last_error)(h)) }.to_string_lossy().into_owned();
+        return Err(format!("选词引擎启动失败: {e}"));
     }
-    STARTED.store(true, Ordering::SeqCst);
     apply_config(cfg);
     Ok(())
 }
 
 pub fn stop() {
     let h = HOOK.load(Ordering::SeqCst);
-    if !h.is_null() && unsafe { sh_is_running(h) } != 0 {
-        unsafe { sh_stop(h) };
+    let Ok(api) = api() else { return };
+    if !h.is_null() && unsafe { (api.is_running)(h) } != 0 {
+        unsafe { (api.stop)(h) };
     }
-    STARTED.store(false, Ordering::SeqCst);
 }
 
 pub fn is_running() -> bool {
     let h = HOOK.load(Ordering::SeqCst);
-    !h.is_null() && unsafe { sh_is_running(h) } != 0
+    if h.is_null() {
+        return false;
+    }
+    let Ok(api) = api() else { return false };
+    let running = unsafe { (api.is_running)(h) } != 0;
+    running
 }
 
-/// Synchronous retrieval (used by the "get current selection" command / hotkey).
-pub fn get_current_selection() -> Option<SelectionPayload> {
+/// Queue an asynchronous read of the current selection.
+///
+/// Returns false when nothing was queued (hook stopped, no foreground window, or a retrieval
+/// is already running). The result arrives through the `selection` Tauri event.
+pub fn request_selection(triggered_by_user: bool) -> bool {
     let h = HOOK.load(Ordering::SeqCst);
     if h.is_null() {
-        return None;
+        return false;
     }
-    let mut out: SSelection = unsafe { std::mem::zeroed() };
-    if unsafe { sh_get_current_selection(h, &mut out) } == 0 {
-        return None;
-    }
-    let text = unescape_ptr(out.text);
-    if text.is_empty() {
-        return None;
-    }
-    Some(SelectionPayload {
-        text,
-        program_name: unescape_ptr(out.program_name),
-        pos_level: out.pos_level,
-        ref_point: out.mouse_pos_end,
-        mouse_pos_end: out.mouse_pos_end,
-        start_top: out.start_top,
-        end_bottom: out.end_bottom,
-    })
+    let Ok(api) = api() else { return false };
+    unsafe { (api.request_selection)(h, if triggered_by_user { 1 } else { 0 }) != 0 }
 }
 
 pub fn write_clipboard(text: &str) -> bool {
@@ -329,18 +443,21 @@ pub fn write_clipboard(text: &str) -> bool {
     if h.is_null() {
         return false;
     }
+    let Ok(api) = api() else { return false };
     match std::ffi::CString::new(text) {
-        Ok(c) => unsafe { sh_write_clipboard(h, c.as_ptr()) != 0 },
+        Ok(c) => unsafe { (api.write_clipboard)(h, c.as_ptr()) != 0 },
         Err(_) => false,
     }
 }
 
 pub fn cleanup() {
     let h = HOOK.swap(std::ptr::null_mut(), Ordering::SeqCst);
-    if !h.is_null() {
-        unsafe {
-            sh_stop(h);
-            sh_destroy(h);
-        }
+    if h.is_null() {
+        return;
+    }
+    let Ok(api) = api() else { return };
+    unsafe {
+        (api.stop)(h);
+        (api.destroy)(h);
     }
 }

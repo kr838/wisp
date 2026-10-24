@@ -298,6 +298,35 @@ class SelHook
         return ok;
     }
 
+    /**
+     * Queue a retrieval on the worker thread and deliver the result through the normal
+     * selection callback.
+     *
+     * The host uses this instead of `GetCurrentSelection` so no COM/UIA call ever runs on
+     * its UI thread: a busy or hung foreground application makes a synchronous retrieval
+     * block for an unbounded time, which is what froze the whole app when the tray menu
+     * was used.
+     */
+    bool RequestSelection(bool triggeredByUser)
+    {
+        if (!running_.load())
+            return false;
+        HWND fg = GetForegroundWindow();
+        if (!fg)
+            return false;
+        SelectionRequest req;
+        req.sequence = ++sequence_;
+        req.retrievalHwnd = fg;
+        req.detectionType = SelectionDetectType::None;
+        req.mouseDownPos = lastMouseDownPos_;
+        req.mouseUpPos = lastMouseUpPos_;
+        req.previousMouseUpPos = lastLastMouseUpPos_;
+        req.config = BuildConfig(triggeredByUser);
+        bool ok = worker_.Enqueue(req);
+        SHDBG("request-selection: hwnd=%p user=%d ok=%d", (void*)fg, (int)triggeredByUser, (int)ok);
+        return ok;
+    }
+
     bool WriteClipboard(const std::wstring& text) { return SelectionEngine::TryWriteClipboard(text); }
     bool ReadClipboard(std::wstring& out) { return SelectionEngine::TryReadClipboard(out); }
 
@@ -977,6 +1006,14 @@ void sh_set_fine_tuned(void* handle, int32_t listType, const char* const* list, 
 {
     if (handle)
         ((SelHook*)handle)->SetFineTuned(listType, ToList(list, count));
+}
+
+int32_t sh_request_selection(void* handle, int32_t triggeredByUser)
+{
+    SelHook* h = (SelHook*)handle;
+    if (!h)
+        return 0;
+    return h->RequestSelection(triggeredByUser != 0) ? 1 : 0;
 }
 
 int32_t sh_get_current_selection(void* handle, SSelectionOut* out)

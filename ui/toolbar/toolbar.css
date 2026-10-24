@@ -135,6 +135,10 @@ body {
   font-size: 13px;
   color: var(--text-dim);
   white-space: nowrap;
+  /* A failure message can be a whole sentence; clamp it so the bar never runs off screen. */
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .act:focus-visible {

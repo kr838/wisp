@@ -31,9 +31,8 @@
 - 应用过滤：黑名单 / 白名单（默认已排除资源管理器、截图与图像视频编辑类软件）
 
 **动作**
-- 内置：翻译、总结、解释、润色
+- 每个动作就是一段**提示词**：内置翻译、总结、解释、润色已预填，可直接改
 - 可选内置（默认关闭，到「动作」页开启）：**复制**（本地，不需模型）、**搜索**（用配置的搜索引擎）
-- 自定义动作：任意提示词，可指定模型与思考强度
 - 可增删改、排序、启用/停用、各自配色（彩虹色板）
 
 **模型**
@@ -46,10 +45,12 @@
 - **自定义请求头**（每行一个 `Name: Value`）；OpenCode 系自动附加 `x-opencode-session`
 
 **结果窗口**
+- **可以同时开多个**：每次执行动作都会新建一个结果窗口，旧结果不会被顶掉
 - **Markdown 渲染**：AI 回复按 Markdown 排版（标题 / 列表 / 表格 / 代码块 / 引用）
 - **追问**：可继续对话，完整历史随请求发送，多轮上下文不丢
-- 思考过程、**原文**均为折叠面板（默认收起，原文带字数提示）
-- 流式输出；可停止 / 重试 / 复制结果
+- 思考过程、**原文**均为细折叠条（默认收起，原文带字数提示）
+- 流式输出；可停止 / 重试 / 复制结果（停止后不会再把迟到的回复贴上来）
+- 记住上次窗口尺寸
 
 **界面**
 - 悬浮条：纯文字扁平风格，每个动作独立配色，尺寸精确贴合内容
@@ -112,10 +113,13 @@ cargo tauri build --bundles nsis
 
 ```bash
 cd src-tauri
-cargo test --test actions_default --test roundtrip   # 纯逻辑测试，不需要 DLL
+cargo test --test sse --test panels --test actions_default --test roundtrip
 ```
 
-验证「多轮对话 + 流式解析」（在应用进程内运行，绕开测试二进制的 DLL 加载问题）：
+共 19 项，全部是纯逻辑测试（流式解析、多窗口/停止/重试状态机、配置形状、默认动作），
+不需要原生 DLL，也不需要 WebView2。
+
+验证「多轮对话 + 流式解析」（在应用进程内运行，走真实请求路径）：
 
 ```bash
 # 终端 A：启动模拟接口（会打印每个请求的 roles）
@@ -125,8 +129,9 @@ cd src-tauri && WISP_DEBUG=1 ./target/release/selection-assistant.exe --selftest
 # 期望：第一条 roles=system,user ；第二条 roles=system,user,assistant,user
 ```
 
-> `cargo test --lib` 会因测试二进制旁缺少 `SelectionHook.dll` 而报
-> `STATUS_ENTRYPOINT_NOT_FOUND`——这是测试环境的链接问题，不是产品缺陷。
+> `cargo test --lib` 会在部分环境下因缺少系统 api-set DLL 而无法启动（测试二进制加载
+> Tauri 运行时）。纯逻辑测试因此拆到了 `tests/` 下的集成测试；原生 DLL 也已改为运行时
+> 加载，缺 DLL 时会给出可读错误而不是进程直接中止。
 
 ### 启动参数
 
@@ -135,6 +140,7 @@ cd src-tauri && WISP_DEBUG=1 ./target/release/selection-assistant.exe --selftest
 | `--settings` | 启动即打开设置窗口 |
 | `--preview` | 在屏幕中部直接显示悬浮条（带示例文字），无需真实划词——用于静态查看 UI |
 | `--selftest-chat <baseUrl>` | 在应用进程内跑两轮对话并写入日志，用于验证多轮请求与流式解析 |
+| `--selftest-panels` | 连续打开两个结果窗口并记录 label，用于验证多窗口 |
 
 ### 调试
 

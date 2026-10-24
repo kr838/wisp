@@ -6,17 +6,25 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// One toolbar action.
+///
+/// Every action is prompt-driven: `prompt` IS the instruction sent to the model. The
+/// `builtin` marker survives only to identify the two local actions that never call a
+/// model (`copy`, `search`); everything else is `"custom"`.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Action {
     pub id: String,
     pub name: String,
-    /// Accent colour (hex) used to distinguish this action in the toolbar. Replaces the
-    /// old emoji icon: a "rainbow" of colours keeps the bar flat but still scannable.
+    /// Accent colour (hex) used to distinguish this action in the toolbar.
     #[serde(default = "default_color")]
     pub color: String,
-    /// Kept only for backward compatibility with older settings files; unused.
+    /// Kept only so older settings files (which had an emoji icon) still deserialize; the
+    /// field is never written back.
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub icon: String,
+    /// `"copy"` / `"search"` for the two local actions, otherwise `"custom"`.
+    #[serde(default = "default_custom")]
     pub builtin: String,
     #[serde(default)]
     pub prompt: String,
@@ -36,6 +44,9 @@ fn default_inherit() -> String {
 }
 fn default_color() -> String {
     "#3b6fe0".into()
+}
+fn default_custom() -> String {
+    "custom".into()
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -58,7 +69,7 @@ pub struct Provider {
     pub thinking: String,
     #[serde(default, rename = "thinkingLevel")]
     pub thinking_level: Option<String>,
-    /// Extra HTTP headers sent with every request, as "Name: Value" lines. Needed by some
+    /// Extra HTTP headers sent with every request, as `Name: Value` pairs. Needed by some
     /// gateways (e.g. OpenCode Go requires a stable `x-opencode-session`).
     #[serde(default)]
     pub headers: Vec<HeaderPair>,
@@ -75,8 +86,11 @@ fn default_auto() -> String {
     "auto".into()
 }
 
+/// Every field carries a serde default so a settings file written by an older build (or one
+/// missing a key) still loads instead of being rejected wholesale.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_selected", rename = "triggerMode")]
     pub trigger_mode: String,
@@ -111,12 +125,12 @@ pub struct Settings {
     /// Settings schema version, used to run one-off migrations exactly once.
     #[serde(default, rename = "schemaVersion")]
     pub schema_version: u32,
-    #[serde(default, rename = "searchUrl")]
+    #[serde(default = "default_search_url", rename = "searchUrl")]
     pub search_url: String,
     /// Global default thinking level: auto | off | low | medium | high
     #[serde(default = "default_auto", rename = "thinkingLevel")]
     pub thinking_level: String,
-    #[serde(default)]
+    #[serde(default = "default_actions")]
     pub actions: Vec<Action>,
     #[serde(default)]
     pub providers: Vec<Provider>,
@@ -142,11 +156,16 @@ fn default_glass_opacity() -> f64 {
 fn default_material_dark() -> String {
     "auto".into()
 }
+fn default_search_url() -> String {
+    "https://www.bing.com/search?q={query}".into()
+}
 
 /// Bump when a one-off settings migration is added.
 ///   0 -> 1: append optional built-ins (copy/search) if missing.
 ///   1 -> 2: turn the optional built-ins off, so the toolbar shows only opt-in actions.
-pub const CURRENT_SCHEMA: u32 = 2;
+///   2 -> 3: fold the built-in prompts into each action's `prompt`, so the action editor
+///           has a single prompt field and no action-type selector.
+pub const CURRENT_SCHEMA: u32 = 3;
 
 /// Short random identifier, used for the session id.
 pub fn random_id() -> String {
@@ -173,7 +192,7 @@ impl Default for Settings {
             material_dark: default_material_dark(),
             session_id: random_id(),
             schema_version: CURRENT_SCHEMA,
-            search_url: "https://www.bing.com/search?q={query}".into(),
+            search_url: default_search_url(),
             thinking_level: "auto".into(),
             actions: default_actions(),
             providers: vec![],
@@ -196,28 +215,28 @@ pub const RAINBOW: &[&str] = &[
 ];
 
 fn default_actions() -> Vec<Action> {
-    let mk = |id: &str, name: &str, color: &str, builtin: &str| Action {
+    let mk = |id: &str, name: &str, color: &str, builtin: &str, prompt: &str| Action {
         id: id.into(),
         name: name.into(),
         color: color.into(),
         icon: String::new(),
         builtin: builtin.into(),
-        prompt: String::new(),
+        prompt: prompt.into(),
         enabled: true,
         thinking_level: "inherit".into(),
         provider_id: None,
     };
-    // Optional built-ins: present in 设置 → 动作 so they can be toggled on, but OFF by
-    // default so the toolbar only shows what the user explicitly asked for.
-    let mut copy = mk("copy", "复制", RAINBOW[4], "copy");
+    // The four presets ship with their prompt filled in; the user can edit that text
+    // freely. Optional built-ins (copy/search) are present but OFF by default.
+    let mut copy = mk("copy", "复制", RAINBOW[4], "copy", "");
     copy.enabled = false;
-    let mut search = mk("search", "搜索", RAINBOW[5], "search");
+    let mut search = mk("search", "搜索", RAINBOW[5], "search", "");
     search.enabled = false;
     vec![
-        mk("translate", "翻译", RAINBOW[0], "translate"),
-        mk("summarize", "总结", RAINBOW[1], "summarize"),
-        mk("explain", "解释", RAINBOW[2], "explain"),
-        mk("rewrite", "润色", RAINBOW[3], "rewrite"),
+        mk("translate", "翻译", RAINBOW[0], "custom", crate::ai::PRESET_TRANSLATE),
+        mk("summarize", "总结", RAINBOW[1], "custom", crate::ai::PRESET_SUMMARIZE),
+        mk("explain", "解释", RAINBOW[2], "custom", crate::ai::PRESET_EXPLAIN),
+        mk("rewrite", "润色", RAINBOW[3], "custom", crate::ai::PRESET_REWRITE),
         copy,
         search,
     ]
@@ -235,15 +254,24 @@ pub fn load() -> Settings {
     if let Some(s) = guard.as_ref() {
         return s.clone();
     }
-    let mut s = std::fs::read_to_string(path())
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Settings>(&raw).ok())
-        .unwrap_or_default();
 
-    // Migration: make sure the optional built-ins exist in the action list so they show up
-    // in 设置 → 动作 as rows the user can simply toggle on. They are appended DISABLED, so
-    // nothing new appears on the toolbar until the user asks for it.
-    let mut changed = false;
+    let raw = std::fs::read_to_string(path()).ok();
+    let mut broken = false;
+    let mut s = match raw.as_deref().map(serde_json::from_str::<Settings>) {
+        Some(Ok(s)) => s,
+        Some(Err(e)) => {
+            // Never let a malformed file silently wipe the user's setup: keep a copy of
+            // whatever was there, start from defaults, and tell the log.
+            crate::dlogf!("[store] settings parse failed ({e}); file kept as .corrupt");
+            let backup = path().with_extension(format!("json.corrupt-{}", timestamp()));
+            let _ = std::fs::rename(path(), backup);
+            broken = true;
+            Settings::default()
+        }
+        None => Settings::default(),
+    };
+
+    let mut changed = broken;
 
     // v0 -> v1: ensure the optional built-ins exist so they appear in 设置 → 动作.
     for extra in default_actions() {
@@ -262,6 +290,22 @@ pub fn load() -> Settings {
                 a.enabled = false;
             }
         }
+        s.schema_version = 2;
+        changed = true;
+    }
+
+    // v2 -> v3: the action editor no longer has a type selector. Built-in actions carry
+    // their instruction in `prompt` and become plain custom actions; copy/search keep their
+    // marker because they run locally.
+    if s.schema_version < CURRENT_SCHEMA {
+        for a in s.actions.iter_mut() {
+            if a.builtin != "copy" && a.builtin != "search" {
+                if a.prompt.trim().is_empty() {
+                    a.prompt = crate::ai::builtin_prompt(&a.builtin).to_string();
+                }
+                a.builtin = "custom".into();
+            }
+        }
         s.schema_version = CURRENT_SCHEMA;
         changed = true;
     }
@@ -272,6 +316,11 @@ pub fn load() -> Settings {
 
     *guard = Some(s.clone());
     s
+}
+
+fn timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 pub fn save(s: &Settings) {
@@ -311,7 +360,7 @@ pub fn merge(patch: &Value) -> Settings {
             next
         }
         Err(e) => {
-            eprintln!("[store] rejected settings patch ({e}); keeping previous settings");
+            crate::dlogf!("[store] rejected settings patch ({e}); keeping previous settings");
             load()
         }
     }

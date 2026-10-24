@@ -7,7 +7,10 @@
  *
  * Rendering strategy: while streaming, text is appended as PLAIN text (re-parsing Markdown
  * on every chunk would be wasteful and would fight the caret), then re-rendered as Markdown
- * once the turn completes. Long replies stay smooth and still end up formatted.
+ * once the turn completes.
+ *
+ * Every panel is its own window (`action-1`, `action-2`, …), so this script never has to
+ * coordinate with another panel's state.
  */
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
@@ -15,8 +18,6 @@ const { listen } = window.__TAURI__.event
 const $ = (id) => document.getElementById(id)
 const els = {
   name: $('name'),
-  model: $('model'),
-  badge: $('think-badge'),
   thinkWrap: $('think-wrap'),
   think: $('think'),
   thinkState: $('think-state'),
@@ -41,6 +42,8 @@ let currentAnswer = null
 /** Raw text of the current answer / of the most recently finished one. */
 let currentText = ''
 let lastAnswerText = ''
+/** Set when the first turn has been started, so a re-shown window does not double-run. */
+let started = false
 
 // ---- markdown ---------------------------------------------------------------
 
@@ -77,10 +80,12 @@ function setEmpty(text, isError) {
 
 function setBusy(busy) {
   streaming = busy
-  els.stop.disabled = !busy
-  els.retry.disabled = busy
+  // Only one of 发送 / 停止 is visible at a time, so the footer stays a single row.
+  els.stop.hidden = !busy
+  els.askBtn.hidden = busy
   els.askBtn.disabled = busy
   els.askInput.disabled = busy
+  if (busy) els.retry.hidden = true
 }
 
 function scrollThread() {
@@ -154,17 +159,17 @@ async function applyAppearance() {
 // ---- lifecycle --------------------------------------------------------------
 
 async function begin() {
+  if (started) return
+  started = true
   await applyAppearance()
   ctx = await invoke('action_get_context')
-  if (!ctx) return
+  if (!ctx) {
+    setEmpty('无法读取动作状态，请关闭后重试。', true)
+    return
+  }
 
   els.name.textContent = ctx.action.name || '处理'
   if (ctx.action.color) document.documentElement.style.setProperty('--c', ctx.action.color)
-  els.model.textContent = ctx.provider ? ctx.modelName : '未配置模型'
-  els.badge.textContent =
-    ctx.thinkingSupported && ctx.thinkingLevel && ctx.thinkingLevel !== 'auto'
-      ? THINK_LABELS[ctx.thinkingLevel] || ctx.thinkingLevel
-      : ''
 
   // Source text: collapsed by default, with a length hint so it stays discoverable.
   const chars = (ctx.text || '').length
@@ -180,15 +185,15 @@ async function begin() {
   currentAnswer = null
 
   if (!ctx.provider) {
-    setEmpty('尚未配置 AI 模型。右键托盘图标 → 打开设置，添加模型提供商。', true)
+    setEmpty('尚未配置 AI 模型。打开设置，在「模型」页添加一个提供商。', true)
     setBusy(false)
-    els.stop.disabled = true
-    els.retry.disabled = true
+    els.stop.hidden = true
     els.askInput.disabled = true
     els.askBtn.disabled = true
     return
   }
 
+  // A fresh panel starts here; 重试 re-enters through the same path with `started` cleared.
   setBusy(true)
   setEmpty('正在生成…')
   beginAnswer()
@@ -224,7 +229,24 @@ function autoGrow() {
 // ---- events -----------------------------------------------------------------
 
 els.stop.addEventListener('click', () => invoke('action_stop'))
-els.retry.addEventListener('click', () => begin())
+els.retry.addEventListener('click', () => {
+  // Replay the first turn from a clean slate. The backend resets its conversation to the
+  // same initial messages, so retrying never duplicates the selected text in the history.
+  started = false
+  streaming = false
+  currentText = ''
+  lastAnswerText = ''
+  reasoning = ''
+  els.retry.hidden = true
+  els.askInput.disabled = false
+  els.askBtn.disabled = false
+  els.thinkWrap.hidden = true
+  els.thinkWrap.open = false
+  els.thread.innerHTML = ''
+  els.thread.appendChild(els.empty)
+  currentAnswer = null
+  begin()
+})
 els.copy.addEventListener('click', async () => {
   const text = lastAnswerText || currentText
   if (!text) return
@@ -243,6 +265,10 @@ els.askInput.addEventListener('keydown', (e) => {
     e.preventDefault()
     sendFollowUp()
   }
+})
+// Ctrl/Cmd+C on a text selection copies the app's own result, not the page source.
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') invoke('action_close')
 })
 
 listen('action-start', () => begin())
@@ -276,6 +302,8 @@ listen('action-error', (e) => {
   } else {
     setEmpty(e.payload || '请求失败', true)
   }
+  // Retry is only meaningful once a turn has failed.
+  els.retry.hidden = false
 })
 listen('action-aborted', () => {
   setBusy(false)
