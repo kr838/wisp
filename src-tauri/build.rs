@@ -13,7 +13,40 @@ fn main() {
     copy_native_dll(native.join("SelectionHook.dll"));
     println!("cargo:rerun-if-changed={}", native.join("SelectionHook.dll").display());
 
+    // The installer bundles `src-tauri/SelectionHook.dll` (see tauri.conf.json's `resources`),
+    // which is a committed copy of the built DLL. If it drifts from `native/`, the packaged app
+    // silently ships an old engine — e.g. one without `sh_request_selection`, which would make
+    // the tray "show toolbar" entry stop working while every local build looked fine.
+    sync_bundled_dll(&native.join("SelectionHook.dll"), &manifest.join("SelectionHook.dll"));
+
     tauri_build::build()
+}
+
+/// Keep the committed copy used by the installer in step with the freshly built DLL.
+///
+/// A build script cannot write outside OUT_DIR in a way cargo tracks, so this copies the file
+/// instead of failing the build: the warning makes a stale bundle visible without blocking
+/// `cargo check` in a checkout that has not built the native side yet.
+fn sync_bundled_dll(native_dll: &std::path::Path, bundled: &std::path::Path) {
+    if !native_dll.exists() {
+        println!("cargo:warning=native/SelectionHook.dll is missing; the installer will contain no engine");
+        return;
+    }
+    let same = std::fs::metadata(bundled)
+        .and_then(|m| m.modified())
+        .ok()
+        .zip(std::fs::metadata(native_dll).and_then(|m| m.modified()).ok())
+        .map(|(bundled_t, native_t)| bundled_t >= native_t)
+        .unwrap_or(false);
+    if same {
+        return;
+    }
+    match std::fs::copy(native_dll, bundled) {
+        Ok(_) => println!(
+            "cargo:warning=refreshed src-tauri/SelectionHook.dll from native/ (it was older than the built engine)"
+        ),
+        Err(e) => println!("cargo:warning=could not refresh src-tauri/SelectionHook.dll: {e}"),
+    }
 }
 
 /// Put the runtime DLLs next to the build outputs.
