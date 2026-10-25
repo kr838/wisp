@@ -56,7 +56,6 @@ fn header_is_a_deep_drag_region_with_clickable_buttons() {
         .unwrap_or_default()
         .to_string();
     let buttons: Vec<&str> = header.lines().filter(|l| l.contains("<button")).collect();
-    assert!(!buttons.is_empty(), "the header must contain the close button");
     for b in &buttons {
         assert!(
             b.contains(r#"data-tauri-drag-region="false""#),
@@ -64,7 +63,14 @@ fn header_is_a_deep_drag_region_with_clickable_buttons() {
             b.trim()
         );
     }
-    // 复制结果 was removed: the header keeps only the close button.
+    // An undecorated window has no native title bar, so all three controls must exist.
+    for id in ["btn-min", "btn-max", "btn-close"] {
+        assert!(
+            html.contains(&format!(r#"id="{id}""#)),
+            "the header must provide {id}"
+        );
+    }
+    // 复制结果 was removed: it duplicated selecting the text.
     assert!(
         !html.contains("btn-copy"),
         "the result window must not offer a copy button"

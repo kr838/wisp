@@ -137,14 +137,19 @@ html, body {
 /* Pushes the window buttons to the right edge now that .meta no longer stretches. */
 .win-btns { display: flex; gap: 2px; flex: 0 0 auto; margin-left: auto; }
 .wb {
-  width: 26px; height: 26px;
+  width: 30px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
   border: none; border-radius: 6px;
   background: transparent;
   color: var(--muted);
   font-size: 13px; line-height: 1;
   cursor: pointer;
+  padding: 0;
   transition: background-color 0.1s, color 0.1s;
 }
+.wb svg { display: block; }
+/* Close keeps the Windows convention of turning red on hover. */
+.wb-close:hover { background: #c42b1c; color: #fff; }
 .wb:hover { background: var(--hover); color: var(--fg); }
 
 /* ---- fold panels (reasoning / source): thin, no outer margin ---- */

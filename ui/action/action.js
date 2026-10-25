@@ -14,6 +14,13 @@
  */
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
+const { getCurrentWindow } = window.__TAURI__.window
+
+/**
+ * Handle to THIS window, used both to scope event listeners and to drive the window buttons.
+ */
+const thisWindow = getCurrentWindow()
+const myLabel = thisWindow.label
 
 /**
  * Listen for an event addressed to THIS window only.
@@ -23,7 +30,6 @@ const { listen } = window.__TAURI__.event
  * With two panels open, the answer meant for `action-2` was also appended to `action-1`.
  * Targeting the current window label keeps each panel to its own stream.
  */
-const myLabel = window.__TAURI__.window.getCurrentWindow().label
 const onOwn = (name, handler) => listen(name, handler, { target: myLabel })
 
 const $ = (id) => document.getElementById(id)
@@ -263,7 +269,42 @@ els.retry.addEventListener('click', () => {
   currentAnswer = null
   begin()
 })
+// ---- window controls --------------------------------------------------------
+// The window is undecorated, so minimise / maximise / close have to be wired by hand.
+$('btn-min').addEventListener('click', () => thisWindow.minimize())
+$('btn-max').addEventListener('click', async () => {
+  // Toggle: the same button restores a maximised window, as on a native title bar.
+  await thisWindow.toggleMaximize()
+  syncMaxButton()
+})
 $('btn-close').addEventListener('click', () => invoke('action_close'))
+
+/// Reflect the maximised state on the button (icon + tooltip), so it matches Windows.
+async function syncMaxButton() {
+  const btn = $('btn-max')
+  let maximized = false
+  try {
+    maximized = await thisWindow.isMaximized()
+  } catch {
+    return
+  }
+  const restore = maximized
+  btn.title = restore ? '向下还原' : '最大化'
+  btn.setAttribute('aria-label', btn.title)
+  btn.innerHTML = restore
+    ? '<svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">' +
+      '<rect x="2" y="3" width="4.5" height="4.5" stroke="currentColor" stroke-width="1" fill="none"/>' +
+      '<path d="M4 3V2h4v4H7" stroke="currentColor" stroke-width="1" fill="none"/></svg>'
+    : '<svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">' +
+      '<rect x="2.5" y="2.5" width="5" height="5" stroke="currentColor" stroke-width="1" fill="none"/></svg>'
+}
+
+// Keep the icon right when the state changes by any route (double-clicking the drag region,
+// snap layout, Win+Up, …). `listen` here is the window-scoped one.
+thisWindow.listen('tauri://resize', syncMaxButton)
+thisWindow.listen('tauri://maximize', syncMaxButton)
+thisWindow.listen('tauri://unmaximize', syncMaxButton)
+syncMaxButton()
 
 els.askBtn.addEventListener('click', sendFollowUp)
 els.askInput.addEventListener('input', autoGrow)

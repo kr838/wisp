@@ -20,7 +20,15 @@
           <span class="think-badge" id="think-badge" hidden></span>
         </span>
         <span class="win-btns">
-          <button class="wb" id="btn-close" title="关闭" data-tauri-drag-region="false">✕</button>
+          <button class="wb" id="btn-min" title="最小化" aria-label="最小化" data-tauri-drag-region="false">
+            <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M2 5.5h6" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+          </button>
+          <button class="wb" id="btn-max" title="最大化" aria-label="最大化" data-tauri-drag-region="false">
+            <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><rect x="2.5" y="2.5" width="5" height="5" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+          </button>
+          <button class="wb wb-close" id="btn-close" title="关闭" aria-label="关闭" data-tauri-drag-region="false">
+            <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M2.5 2.5l5 5M7.5 2.5l-5 5" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+          </button>
         </span>
       </header>
 

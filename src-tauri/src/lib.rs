@@ -1554,6 +1554,12 @@ pub fn run() {
             // Remember the panel's size so the next result opens at the size the user chose.
             tauri::WindowEvent::Resized(size) => {
                 if window.label().starts_with("action") {
+                    // Only the restored size is worth remembering: a maximised window reports
+                    // the screen size here, and storing that would make every later panel open
+                    // full-screen instead of at the size the user picked.
+                    if window.is_maximized().unwrap_or(false) {
+                        return;
+                    }
                     // `size` is physical; convert to logical for the builder.
                     let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
                     if let Some(app) = window.app_handle().try_state::<State>() {
