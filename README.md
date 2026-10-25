@@ -91,7 +91,7 @@
 | **WebView2** | 系统自带（Win10/11 一般都有） |
 
 > 本项目全程使用**免管理员的便携工具链**（rustup 用户级安装 + MSYS2 便携解压），
-> 无需 Visual Studio。详见 [DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+> 无需 Visual Studio。
 
 ### 步骤
 
